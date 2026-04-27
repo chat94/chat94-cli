@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Connect Color Options</title>
+  <style>
+    :root {
+      --bg: #23262f;
+      --panel: #2a2e38;
+      --border: #424856;
+      --text: #f3f5f7;
+      --muted: #aab1bd;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      background: radial-gradient(circle at top, #323744, var(--bg) 48%);
+      color: var(--text);
+    }
+
+    main {
+      max-width: 1500px;
+      margin: 0 auto;
+      padding: 28px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      line-height: 1.2;
+    }
+
+    p {
+      margin: 0 0 22px;
+      color: var(--muted);
+      max-width: 900px;
+      line-height: 1.5;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 14px;
+    }
+
+    .card {
+      background: color-mix(in srgb, var(--panel) 92%, black);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px 16px 16px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+    }
+
+    .meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .sample {
+      font-size: 25px;
+      line-height: 1.35;
+      letter-spacing: 0.01em;
+      margin-bottom: 10px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .bar {
+      height: 8px;
+      border-radius: 999px;
+      background: var(--swatch);
+      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08) inset;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>200 Color Options</h1>
+    <p>
+      Each card shows a candidate text color on a dark terminal-like background.
+      Pick an option number and I’ll wire it into the status prefix.
+    </p>
+    <section class="grid" id="grid"></section>
+  </main>
+
+  <script>
+    const grid = document.getElementById("grid");
+    const sample = "⠋ Typing 17s Gerald the dragon had one job.";
+
+    function hslToHex(h, s, l) {
+      s /= 100;
+      l /= 100;
+      const c = (1 - Math.abs(2 * l - 1)) * s;
+      const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+      const m = l - c / 2;
+      let r = 0, g = 0, b = 0;
+
+      if (h < 60) [r, g, b] = [c, x, 0];
+      else if (h < 120) [r, g, b] = [x, c, 0];
+      else if (h < 180) [r, g, b] = [0, c, x];
+      else if (h < 240) [r, g, b] = [0, x, c];
+      else if (h < 300) [r, g, b] = [x, 0, c];
+      else [r, g, b] = [c, 0, x];
+
+      const toHex = (value) =>
+        Math.round((value + m) * 255).toString(16).padStart(2, "0");
+
+      return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+    }
+
+    const colors = [];
+    for (let i = 0; i < 200; i += 1) {
+      const hue = (i * 17) % 360;
+      const saturation = 52 + (i % 5) * 8;
+      const lightness = 54 + (i % 4) * 6;
+      const hex = hslToHex(hue, saturation, lightness);
+      colors.push({ index: i + 1, hue, saturation, lightness, hex });
+    }
+
+    for (const color of colors) {
+      const card = document.createElement("article");
+      card.className = "card";
+      card.style.setProperty("--swatch", color.hex);
+      card.innerHTML = `
+        <div class="meta">
+          <span>Option ${String(color.index).padStart(3, "0")}</span>
+          <span>${color.hex}</span>
+        </div>
+        <div class="sample" style="color: ${color.hex}">${sample}</div>
+        <div class="bar"></div>
+      `;
+      grid.appendChild(card);
+    }
+  </script>
+</body>
+</html>
