@@ -18,12 +18,16 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-14
+            tool: cargo
           - target: x86_64-apple-darwin
             os: macos-14
+            tool: cargo
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            tool: cross
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
+            tool: cross
 
     steps:
       - uses: actions/checkout@v4
@@ -33,19 +37,18 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compile linker (Linux aarch64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - name: Install cross
+        if: matrix.tool == 'cross'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
       - name: Build release binary
         # To embed Sentry telemetry in shipped binaries, add CHAT94_SENTRY_DSN
         # as a repository secret and pass it through here:
         #   env:
         #     CHAT94_SENTRY_DSN: ${{ secrets.CHAT94_SENTRY_DSN }}
-        run: cargo build --release --target ${{ matrix.target }} -p chat94
+        run: ${{ matrix.tool }} build --release --target ${{ matrix.target }} -p chat94
 
       - name: Package tarball
         id: package

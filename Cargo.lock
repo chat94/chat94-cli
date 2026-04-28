@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "chat94"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "chat94-crypto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64",
  "chacha20poly1305",
@@ -312,7 +312,7 @@ dependencies = [
 
 [[package]]
 name = "chat94-proto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "chat94-relay"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "base64",
