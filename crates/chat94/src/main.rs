@@ -1484,10 +1484,11 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
                             chat94_proto::InnerMessageType::TextEnd => {
                                 let id = message.id.to_string();
                                 let text = message.body.get("text").and_then(|v| v.as_str()).unwrap_or_default();
-                                debug!(stream_id = %id, final_text_len = text.len(), "received text_end");
+                                let reset = message.body.get("reset").and_then(|v| v.as_bool()).unwrap_or(false);
+                                debug!(stream_id = %id, final_text_len = text.len(), reset, "received text_end");
                                 let (sender, final_text, suppressed) =
                                     render_state.complete_stream(&id, message.from.clone(), text);
-                                if !suppressed && !final_text.is_empty() {
+                                if !reset && !suppressed && !final_text.is_empty() {
                                     let rendered = render_chat_line(sender.as_ref(), &final_text);
                                     push_transcript_line(&mut transcript, rendered.clone());
                                     paths.append_history(&HistoryEntry {
