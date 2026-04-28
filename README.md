@@ -3,7 +3,7 @@
 > Encrypted terminal client for OpenClaw agents.
 
 <p align="center">
-  <img src="docs/img/cli.png" alt="chat94 CLI screenshot" width="720">
+  <img src="docs/img/cli.gif" alt="chat94 CLI in action" width="720">
 </p>
 
 <p align="center">
