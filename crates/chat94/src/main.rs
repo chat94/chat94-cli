@@ -68,7 +68,7 @@ struct Cli {
     #[arg(long, global = true)]
     log_dir: Option<PathBuf>,
 
-    #[arg(long, global = true, default_value = "debug")]
+    #[arg(long, global = true, default_value = "info")]
     log_level: LogLevel,
 
     #[arg(long, global = true)]
