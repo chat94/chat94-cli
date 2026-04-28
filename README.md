@@ -1,197 +1,179 @@
-# Chat94 CLI (Rust)
+# 🦀 chat94 CLI
 
-Encrypted terminal client for OpenClaw agents.
+> Encrypted terminal client for OpenClaw agents.
 
-This repo is an early Rust implementation of the Chat94 CLI described in [docs/product.md](./docs/product.md). It talks to the same relay protocol as the Swift client and shares the same core crypto and pairing model.
+<p align="center">
+  <img src="docs/img/cli.png" alt="chat94 CLI screenshot" width="720">
+</p>
 
-## Current Status
+<p align="center">
+  <a href="https://github.com/chat94/chat94-cli/actions/workflows/release.yml"><img alt="release" src="https://img.shields.io/github/actions/workflow/status/chat94/chat94-cli/release.yml?label=release"></a>
+  <a href="https://github.com/chat94/chat94-cli/releases/latest"><img alt="latest release" src="https://img.shields.io/github/v/release/chat94/chat94-cli"></a>
+  <a href="./LICENSE"><img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
+  <a href="https://chat94.com"><img alt="homepage" src="https://img.shields.io/badge/web-chat94.com-9b59ff"></a>
+  <a href="https://t.me/chat94official"><img alt="telegram" src="https://img.shields.io/badge/chat-@chat94official-26a5e4?logo=telegram&logoColor=white"></a>
+</p>
 
-Implemented today:
+A line-based, scrollable, end-to-end-encrypted chat for your OpenClaw agent — same relay protocol, same crypto, same pairing model as the [Swift iOS/macOS client](https://github.com/chat94/chat94-apple). All intelligence lives remote; the CLI is just an encrypted pipe.
 
-- Cargo workspace with separate crates for protocol, crypto, relay, and CLI
-- Relay protocol models and JSON builders/parsers
-- Crypto parity helpers for:
-  - group ID derivation
-  - pairing code normalization and room ID derivation
-  - pairing proof generation
-  - X25519 wrapping/unwrapping of the group key
-  - XChaCha20-Poly1305 message encryption/decryption
-- Relay-backed pairing:
-  - `chat94 pair`
-  - `chat94 pair --host`
-  - inline `/pair` from inside chat
-- Relay-backed app session:
-  - `hello` handshake
-  - encrypted send/receive
-  - typing events
-  - heartbeat tracking
-- Interactive terminal session using `reedline`
-- File-backed input history
-- Local transcript replay and append-only history storage
-- Auto-reconnect with exponential backoff
-- File-backed logging for info, debug, and exceptions
+---
 
-## Telemetry
+## 🚀 Install
 
-chat94 sends anonymous error reports to help us fix bugs faster.
-
-We collect:
-
-- Crash reports and stack traces
-- CLI version
-- OS platform and architecture
-- An anonymous install ID
-
-We do not collect:
-
-- Message content, AI prompts, or AI responses
-- Command-line arguments
-- Environment variables
-- File contents or filesystem paths containing your identity
-- API keys, tokens, or credentials
-- Your name, email, or system username
-- Your IP address
-
-Disable telemetry:
-
-```bash
-chat94 telemetry disable
-export CHAT94_TELEMETRY_DISABLED=1
-chat94 --no-telemetry
+**Homebrew (macOS + Linux):**
+```sh
+brew install chat94/tap/chat94
 ```
 
-Check status:
-
-```bash
-chat94 telemetry status
+**From source:**
+```sh
+cargo install --git https://github.com/chat94/chat94-cli chat94
 ```
 
-Privacy policy: https://chat94.com/privacy
+**Update:**
+```sh
+brew upgrade chat94
+```
 
-Still rough / not done yet:
+---
 
-- End-to-end live validation against a real relay/plugin stack in this repo
-- Polished chunk-by-chunk streaming renderer
-- Full product-spec UX parity for prompt handling and slash commands
-- Packaging / install flow
+## ⚡ Quick start
 
-## Workspace Layout
+```sh
+chat94
+```
+
+First run drops you into pairing — enter a code from another device, or hit Enter to host a new group (prints a code + QR). After pairing you're in the chat.
+
+```sh
+chat94 pair             # join — enter a code
+chat94 pair --host      # host — print code + QR for another device
+chat94 status           # show current connection
+chat94 disconnect       # forget local pairing
+chat94 --help           # full flag list
+```
+
+In-session slash commands: `/help` `/status` `/pair` `/clear` `/reset-history` `/disconnect` `/support` `/quit`
+
+---
+
+## ⌨️ Keyboard
+
+| Keys | Action |
+|---|---|
+| `Enter` | Send message |
+| `Shift+Enter` / `Option+Enter` | Insert newline |
+| `↑` / `↓` | Browse input history (when at bottom of transcript) |
+| `Option+Backspace` | Delete previous word |
+| `PgUp` / `PgDn` | Scroll transcript |
+| Mouse wheel | Scroll transcript |
+| `Ctrl+C` | Cancel local render / press twice to exit |
+| `Ctrl+D` | Exit |
+
+---
+
+## 🔒 Security model
+
+- **End-to-end encrypted.** XChaCha20-Poly1305 with a 32-byte group key. The relay sees ciphertext only.
+- **Group key is the only durable secret** — stored at `~/Library/Application Support/chat94/group-config.json` (or `$XDG_CONFIG_HOME/chat94/`) with `0600` perms.
+- **Pairing** is a short low-entropy code with a 5-minute TTL; the proof exchange binds the code to the exact room participants.
+- **No plaintext logging.** Even at `--log-level debug`, message bodies aren't written to disk.
+- **No telemetry of message content** — see below.
+
+---
+
+## 📊 Telemetry
+
+chat94 sends anonymous **error reports only** to help fix bugs.
+
+**We collect:** crash reports & stack traces, CLI version, OS platform/arch, an anonymous install ID.
+**We never collect:** message content, AI prompts/responses, command-line arguments, environment variables, paths containing your username, API keys/tokens/credentials, your name/email/system username, or your IP address.
+
+```sh
+chat94 telemetry status      # see current state
+chat94 telemetry disable     # opt out persistently
+chat94 --no-telemetry        # opt out for one run
+export CHAT94_TELEMETRY_DISABLED=1   # opt out via env
+```
+
+Privacy policy: <https://chat94.com/privacy>
+
+---
+
+## 📁 Local data
+
+| Path | What |
+|---|---|
+| `~/Library/Application Support/chat94/group-config.json` | Group key (paired identity) |
+| `~/Library/Application Support/chat94/history.jsonl` | Chat transcript, append-only JSON-lines |
+| `~/Library/Application Support/chat94/input_history` | `↑` recall of past messages |
+| `~/Library/Application Support/chat94/device-identity.json` | Per-device id + display name |
+| `~/Library/Application Support/chat94/update-nag.json` | "Update available" 30-day throttle |
+| `~/Library/Application Support/chat94/logs/` | `info.log`, `debug.log`, `exceptions.log` |
+| `~/.config/chat94/` | Telemetry config (`install-id`, `telemetry-enabled`, `notice-shown`) |
+
+(On Linux, `~/.local/share/chat94/` for data and `~/.config/chat94/` for config.)
+
+`chat94 disconnect` wipes everything except logs and telemetry config.
+
+---
+
+## 🛰 Relay
+
+Default relay endpoint:
+
+- **WebSocket:** `wss://relay.chat94.com/ws`
+- **Health:** `https://relay.chat94.com/health`
+
+---
+
+## 🧱 Workspace layout
 
 ```text
-chat94-cli-rs/
+chat94-cli/
 ├── crates/
 │   ├── chat94/          CLI binary
 │   ├── chat94-crypto/   crypto + pairing helpers
 │   ├── chat94-proto/    relay wire protocol
 │   └── chat94-relay/    websocket session + pairing client
 ├── docs/
-│   └── product.md
+│   └── product.md       full product spec
+├── .github/workflows/
+│   └── release.yml      multi-arch binary builds on tag push
 ├── Cargo.toml
 └── README.md
 ```
 
-## Commands
+---
 
-```bash
-chat94
-chat94 --log-level debug
-chat94 --stdout-logs
-chat94 --log-dir /tmp/chat94-logs
-chat94 --no-telemetry
-chat94 pair
-chat94 pair --host
-chat94 status
-chat94 disconnect
-chat94 telemetry status
-chat94 telemetry disable
-chat94 telemetry enable
-```
+## 🛠 Build & test
 
-Useful combinations:
-
-```bash
-cargo run -p chat94 --
-cargo run -p chat94 -- --log-level debug --stdout-logs
-./target/debug/chat94
-```
-
-Current in-session commands:
-
-- `/help`
-- `/status`
-- `/pair`
-- `/clear`
-- `/reset-history`
-- `/disconnect`
-- `/quit`
-
-Input tips:
-
-- Mouse wheel scrolls the chat transcript.
-- `Up` / `Down` browse your input history when you are back at the bottom of the chat.
-- `Shift+Enter` and `Option+Enter` insert a newline.
-- `Option+Backspace` deletes the previous word.
-
-## Local Data
-
-The CLI stores:
-
-- config at XDG config dir: `chat94/group-config.json`
-- transcript at XDG data dir: `chat94/history.jsonl`
-- input history at XDG data dir: `chat94/input_history`
-- logs at XDG data dir: `chat94/logs/`
-  - `info.log`
-  - `debug.log`
-  - `exceptions.log`
-- telemetry config at `~/.config/chat94/`
-  - `install-id`
-  - `notice-shown`
-  - `telemetry-enabled`
-
-Saved config currently includes:
-
-- shared group key
-
-## Build
-
-```bash
+```sh
 cargo build
+cargo test
+cargo fmt --all
 ./target/debug/chat94 --help
 ```
 
-## Test
+Test coverage is strongest around protocol parsing and crypto parity with the Swift client.
 
-```bash
-cargo test
-cargo fmt --all
-```
+---
 
-Current automated coverage is strongest around protocol and crypto parity.
+## 🤝 Contributing
 
-## Notes
+Contributions welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) — a CLA bot will prompt you on your first PR.
 
-- The CLI is designed to interoperate with the sibling Swift client and plugin repos.
-- The relay currently needs to accept CLI app-role clients without App Attest.
-- This repo currently prioritizes protocol correctness and incremental CLI bring-up over UI polish.
+Talk to the team:
+- 📨 Telegram: <https://t.me/chat94official>
+- 🌐 Web: <https://chat94.com>
+- 📚 Docs: <https://chat94.com/help>
 
-## Relay
+---
 
-Use this relay:
+## 📜 License
 
-- WebSocket URL: `wss://relay.chat94.com/ws`
-- Health URL: `https://relay.chat94.com/health`
-
-If a client configures parts separately:
-
-- host: `relay.chat94.com`
-- port: `443`
-- path: `/ws`
-- TLS: `true`
-
-## License
-
-chat94 is licensed under the **GNU General Public License v3.0** (GPL-3.0). See the [LICENSE](./LICENSE) file for details.
+chat94 is licensed under the **GNU General Public License v3.0** (GPL-3.0). See [LICENSE](./LICENSE) for the full text.
 
 Copyright © 2026 NeonNode Limited. All rights reserved.
 
-**Commercial licensing:** If you want to use chat94 in a way that GPL-3.0 doesn't allow (e.g. proprietary/closed-source use), contact contact@chat94.com for a commercial license.
+**Commercial licensing:** if you want to use chat94 in a way that GPL-3.0 doesn't allow (e.g. proprietary/closed-source distribution), contact <contact@chat94.com>.
