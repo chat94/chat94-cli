@@ -3,10 +3,6 @@
 > Encrypted terminal client for OpenClaw agents.
 
 <p align="center">
-  <img src="docs/img/cli.gif" alt="chat94 CLI in action" width="720">
-</p>
-
-<p align="center">
   <a href="https://github.com/chat94/chat94-cli/actions/workflows/release.yml"><img alt="release" src="https://img.shields.io/github/actions/workflow/status/chat94/chat94-cli/release.yml?label=release"></a>
   <a href="https://github.com/chat94/chat94-cli/releases/latest"><img alt="latest release" src="https://img.shields.io/github/v/release/chat94/chat94-cli"></a>
   <a href="./LICENSE"><img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
