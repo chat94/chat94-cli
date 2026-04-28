@@ -3,11 +3,7 @@
 > Encrypted terminal client for OpenClaw agents.
 
 <p align="center">
-  <a href="https://github.com/chat94/chat94-cli/actions/workflows/release.yml"><img alt="release" src="https://img.shields.io/github/actions/workflow/status/chat94/chat94-cli/release.yml?label=release"></a>
-  <a href="https://github.com/chat94/chat94-cli/releases/latest"><img alt="latest release" src="https://img.shields.io/github/v/release/chat94/chat94-cli"></a>
-  <a href="./LICENSE"><img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
-  <a href="https://chat94.com"><img alt="homepage" src="https://img.shields.io/badge/web-chat94.com-9b59ff"></a>
-  <a href="https://t.me/chat94official"><img alt="telegram" src="https://img.shields.io/badge/chat-@chat94official-26a5e4?logo=telegram&logoColor=white"></a>
+  <img src="docs/img/cli.gif" alt="chat94 CLI in action" width="720">
 </p>
 
 A line-based, scrollable, end-to-end-encrypted chat for your OpenClaw agent — same relay protocol, same crypto, same pairing model as the [Swift iOS/macOS client](https://github.com/chat94/chat94-apple). All intelligence lives remote; the CLI is just an encrypted pipe.
