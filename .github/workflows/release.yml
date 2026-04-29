@@ -44,10 +44,8 @@ jobs:
           tool: cross
 
       - name: Build release binary
-        # To embed Sentry telemetry in shipped binaries, add CHAT4000_SENTRY_DSN
-        # as a repository secret and pass it through here:
-        #   env:
-        #     CHAT4000_SENTRY_DSN: ${{ secrets.CHAT4000_SENTRY_DSN }}
+        env:
+          CHAT4000_SENTRY_DSN: ${{ secrets.CHAT4000_SENTRY_DSN }}
         run: ${{ matrix.tool }} build --release --target ${{ matrix.target }} -p chat4000
 
       - name: Package tarball
