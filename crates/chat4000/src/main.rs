@@ -12,8 +12,9 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use chrono::{Local, TimeZone};
 use chat4000_crypto::{
     GROUP_KEY_LEN, PAIRING_CODE_ALPHABET, derive_group_id, derive_pairing_room_id,
     generate_group_key, generate_pairing_code, normalize_pairing_code,
@@ -92,8 +93,28 @@ enum Command {
     Disconnect,
     Support,
     Telemetry(TelemetryArgs),
+    Send(SendArgs),
+    History(HistoryArgs),
+    Guide,
     #[command(name = "debug-exception", hide = true)]
     DebugException(DebugExceptionArgs),
+}
+
+#[derive(Args, Debug)]
+struct SendArgs {
+    /// Message to send. If omitted, the message is read from stdin.
+    message: Option<String>,
+
+    /// Seconds to wait for the agent's reply before giving up.
+    #[arg(long, default_value_t = 120)]
+    timeout: u64,
+}
+
+#[derive(Args, Debug)]
+struct HistoryArgs {
+    /// Number of past messages to show (oldest → newest).
+    #[arg(short = 'n', long, default_value_t = 5)]
+    limit: usize,
 }
 
 #[derive(Args, Debug)]
@@ -238,6 +259,12 @@ async fn main() {
         Some(Command::Disconnect) => cmd_disconnect(&paths),
         Some(Command::Support) => cmd_support(),
         Some(Command::Telemetry(_)) => Ok(()),
+        Some(Command::Send(args)) => cmd_send(args, &paths).await,
+        Some(Command::History(args)) => cmd_history(args, &paths),
+        Some(Command::Guide) => {
+            print_guide();
+            Ok(())
+        }
         Some(Command::DebugException(args)) => cmd_debug_exception(args),
         None => cmd_chat_bootstrap(&paths).await,
     };
@@ -795,6 +822,252 @@ fn open_support_url() -> Result<()> {
     } else {
         bail!("browser opener exited with {status}")
     }
+}
+
+async fn cmd_send(args: SendArgs, paths: &AppPaths) -> Result<()> {
+    info!(timeout = args.timeout, "running send command");
+
+    let config = paths
+        .load_config()?
+        .ok_or_else(|| anyhow!("not paired — run `chat4000 pair` first"))?;
+
+    let message = match args.message {
+        Some(msg) => msg,
+        None => {
+            use std::io::Read;
+            let mut buf = String::new();
+            io::stdin()
+                .read_to_string(&mut buf)
+                .context("failed reading message from stdin")?;
+            let trimmed = buf.trim().to_string();
+            if trimmed.is_empty() {
+                bail!("no message given (positional argument or stdin required)");
+            }
+            trimmed
+        }
+    };
+
+    let sent_ts = unix_ms();
+    paths.append_history(&HistoryEntry {
+        role: HistoryRole::User,
+        text: message.clone(),
+        ts: sent_ts,
+    })?;
+    println!("[{}] you: {}", format_ts_with_ms(sent_ts), message);
+
+    let group_key = config.group_key()?;
+    let group_id = config.group_id()?;
+    let identity = paths.load_or_create_device_identity()?;
+
+    let mut session = connect_session(
+        DEFAULT_RELAY_URL,
+        &group_id,
+        group_key,
+        Some(identity.sender()),
+        None,
+        Some(DEFAULT_APP_ID.to_string()),
+        Some(env!("CARGO_PKG_VERSION").to_string()),
+        false,
+    )
+    .await
+    .context("failed to connect to relay")?;
+
+    session
+        .send_text(&message)
+        .context("failed to send message")?;
+
+    let timeout = Duration::from_secs(args.timeout);
+    let reply = tokio::time::timeout(timeout, wait_for_agent_reply(&mut session, &identity))
+        .await
+        .map_err(|_| anyhow!("timed out after {}s waiting for agent reply", args.timeout))??;
+
+    let reply_ts = unix_ms();
+    paths.append_history(&HistoryEntry {
+        role: HistoryRole::Agent,
+        text: reply.clone(),
+        ts: reply_ts,
+    })?;
+    println!("[{}] agent: {}", format_ts_with_ms(reply_ts), reply);
+
+    Ok(())
+}
+
+async fn wait_for_agent_reply(
+    session: &mut chat4000_relay::RelaySession,
+    identity: &AppDeviceIdentity,
+) -> Result<String> {
+    let mut buffers: HashMap<String, String> = HashMap::new();
+    while let Some(event) = session.next_event().await {
+        match event {
+            SessionEvent::Connected => {}
+            SessionEvent::Disconnected(reason) => {
+                bail!("relay session disconnected: {reason}");
+            }
+            SessionEvent::InnerMessage(message) => {
+                if identity.is_local_sender(message.from.as_ref()) {
+                    continue;
+                }
+                match message.t {
+                    chat4000_proto::InnerMessageType::Text => {
+                        if let Some(text) = message.body.get("text").and_then(|v| v.as_str()) {
+                            return Ok(text.to_string());
+                        }
+                    }
+                    chat4000_proto::InnerMessageType::TextDelta => {
+                        let id = message.id.to_string();
+                        let delta = message
+                            .body
+                            .get("delta")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        buffers.entry(id).or_default().push_str(delta);
+                    }
+                    chat4000_proto::InnerMessageType::TextEnd => {
+                        let id = message.id.to_string();
+                        let final_text = message
+                            .body
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        let reset = message
+                            .body
+                            .get("reset")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        if reset {
+                            buffers.remove(&id);
+                            continue;
+                        }
+                        let assembled = if !final_text.is_empty() {
+                            final_text.to_string()
+                        } else {
+                            buffers.remove(&id).unwrap_or_default()
+                        };
+                        return Ok(assembled);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    bail!("relay session closed before any agent reply arrived");
+}
+
+fn cmd_history(args: HistoryArgs, paths: &AppPaths) -> Result<()> {
+    info!(limit = args.limit, "running history command");
+    let entries = paths.read_history(args.limit)?;
+    if entries.is_empty() {
+        println!("(no messages yet)");
+        return Ok(());
+    }
+    for entry in &entries {
+        let role_label = match entry.role {
+            HistoryRole::User => "you",
+            HistoryRole::Agent => "agent",
+        };
+        println!(
+            "[{}] {}: {}",
+            format_ts_with_ms(entry.ts),
+            role_label,
+            entry.text
+        );
+    }
+    Ok(())
+}
+
+fn format_ts_with_ms(unix_ms_value: i64) -> String {
+    Local
+        .timestamp_millis_opt(unix_ms_value)
+        .single()
+        .map(|dt| dt.format("%H:%M:%S%.3f").to_string())
+        .unwrap_or_else(|| "--:--:--.---".to_string())
+}
+
+fn print_guide() {
+    println!(
+        "{}",
+        r#"chat4000 — encrypted terminal client for OpenClaw agents
+
+INTERACTIVE CHAT
+  chat4000                       Launch the interactive TUI. First run drops
+                                 you into pairing if you haven't paired.
+
+PAIRING
+  chat4000 pair                  Join an existing group: enter a code shown
+                                 by another device.
+  chat4000 pair --host           Host a new group: prints a 6-character code
+                                 and a QR for another device to scan.
+
+ONE-SHOT MESSAGING (no streaming, prints the agent's full reply)
+  chat4000 send "hello"          Send and wait for the reply (default 120s).
+  echo "hello" | chat4000 send   Pipe the message in via stdin instead.
+  chat4000 send "msg" --timeout 300
+                                 Wait up to 5 minutes for the reply.
+
+  Output (both lines on stdout):
+    [HH:MM:SS.mmm] you: <message>
+    [HH:MM:SS.mmm] agent: <reply>
+
+HISTORY
+  chat4000 history               Show the last 5 messages with timestamps.
+  chat4000 history -n 20         Short form for --limit.
+  chat4000 history --limit 100   Long form. Same output format as `send`.
+
+CONNECTION
+  chat4000 status                Show paired group, relay reachability,
+                                 latest version policy.
+  chat4000 disconnect            Forget local pairing (group config,
+                                 transcript, device identity). Logs and
+                                 telemetry config are kept.
+
+TELEMETRY (Sentry crash reports — opt-out)
+  chat4000 telemetry status      Show current opt-in/out state.
+  chat4000 telemetry enable      Re-enable error reports.
+  chat4000 telemetry disable     Persist opt-out across runs.
+  chat4000 --no-telemetry        Per-run opt-out flag.
+  CHAT4000_TELEMETRY_DISABLED=1  Per-run opt-out via env var.
+
+SUPPORT
+  chat4000 support               Open the chat4000 Telegram channel.
+
+INSIDE THE INTERACTIVE TUI
+
+  Slash commands at the input prompt:
+    /help        Condensed help.
+    /status      Same as `chat4000 status`.
+    /pair        Reopen pairing mid-session.
+    /clear       Clear the visible transcript (history file untouched).
+    /reset-history  Wipe history.jsonl on disk.
+    /disconnect  Same as `chat4000 disconnect`, mid-session.
+    /support     Open the Telegram support channel.
+    /quit        Exit (Ctrl+D also works).
+
+  Keyboard:
+    Enter                          Send message
+    Shift+Enter / Option+Enter     Insert newline
+    Up / Down                      Browse input history at bottom of transcript
+    Option+Backspace               Delete previous word
+    PgUp / PgDn / mouse wheel      Scroll transcript
+    Ctrl+C twice                   Exit
+
+ENV VARS
+  CHAT4000_TELEMETRY_DISABLED=1   Disable Sentry crash reports.
+  CHAT4000_DEVICE_NAME=…          Override the auto-detected device name.
+  CHAT4000_NO_QR=1                Suppress QR rendering during host pairing.
+  CHAT4000_SENTRY_DSN=…           Build-time only; embedded into release builds.
+
+LOCAL FILES (macOS)
+  ~/Library/Application Support/chat4000/group-config.json
+  ~/Library/Application Support/chat4000/history.jsonl
+  ~/Library/Application Support/chat4000/input_history
+  ~/Library/Application Support/chat4000/device-identity.json
+  ~/Library/Application Support/chat4000/update-nag.json
+  ~/Library/Application Support/chat4000/logs/chat4000.log  (rotating, 10 MB cap)
+  ~/.config/chat4000/                                       (telemetry config)
+
+  On Linux, data lives under ~/.local/share/chat4000/ instead.
+"#
+    );
 }
 
 fn cmd_debug_exception(args: DebugExceptionArgs) -> Result<()> {

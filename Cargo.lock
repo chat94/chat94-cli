@@ -270,6 +270,7 @@ dependencies = [
  "chat4000-crypto",
  "chat4000-proto",
  "chat4000-relay",
+ "chrono",
  "clap",
  "crossterm 0.29.0",
  "dirs",
