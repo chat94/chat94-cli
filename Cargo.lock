@@ -263,7 +263,7 @@ dependencies = [
 
 [[package]]
 name = "chat4000"
-version = "0.1.4"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "chat4000-crypto"
-version = "0.1.4"
+version = "1.0.0"
 dependencies = [
  "base64",
  "chacha20poly1305",
@@ -307,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "chat4000-proto"
-version = "0.1.4"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "chat4000-relay"
-version = "0.1.4"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64",
