@@ -1,5 +1,5 @@
 [package]
-name = "chat94"
+name = "chat4000"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,9 +8,9 @@ license.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 clap.workspace = true
-chat94-crypto = { path = "../chat94-crypto" }
-chat94-proto = { path = "../chat94-proto" }
-chat94-relay = { path = "../chat94-relay" }
+chat4000-crypto = { path = "../chat4000-crypto" }
+chat4000-proto = { path = "../chat4000-proto" }
+chat4000-relay = { path = "../chat4000-relay" }
 crossterm.workspace = true
 dirs.workspace = true
 hex.workspace = true

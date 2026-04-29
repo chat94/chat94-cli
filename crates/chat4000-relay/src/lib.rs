@@ -1,4 +1,4 @@
-// chat94
+// chat4000
 // Copyright (C) 2026 NeonNode Limited
 // Licensed under GPL-3.0. See LICENSE file for details.
 
@@ -9,12 +9,12 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use chat94_crypto::{
+use chat4000_crypto::{
     WrappedGroupKey as CryptoWrappedGroupKey, decrypt, derive_group_id, derive_pair_proof,
     derive_pairing_room_id, encrypt, generate_group_key, generate_joiner_keypair,
     generate_pairing_code, unwrap_group_key, wrap_group_key,
 };
-use chat94_proto::{
+use chat4000_proto::{
     ClientRole, DEFAULT_RELAY_URL, HEARTBEAT_INTERVAL_SECS, HelloPayload, IncomingMessage,
     InnerMessage, MessageType, MsgPayload, PairDataMessage, PairingRole, RelayOutgoing, SenderInfo,
     VersionPolicy, WrappedGroupKey,
@@ -298,7 +298,7 @@ pub async fn connect_session(
         "connecting relay session"
     );
     let mut socket = connect(relay_url, allow_self_signed_tls).await?;
-    let hello = serde_json::to_string(&chat94_proto::Envelope::new(
+    let hello = serde_json::to_string(&chat4000_proto::Envelope::new(
         MessageType::Hello,
         HelloPayload {
             role: ClientRole::App,
@@ -615,7 +615,7 @@ fn normalize_and_validate_pairing_code(code: &str) -> Result<String> {
         .chars()
         .flat_map(char::to_uppercase)
         .filter(|ch| !matches!(ch, '-' | ' ' | '\t' | '\n' | '\r'))
-        .filter(|ch| !chat94_crypto::PAIRING_CODE_ALPHABET.contains(&(*ch as u8)))
+        .filter(|ch| !chat4000_crypto::PAIRING_CODE_ALPHABET.contains(&(*ch as u8)))
         .collect();
     if !invalid.is_empty() {
         let invalid_chars = invalid
@@ -625,7 +625,7 @@ fn normalize_and_validate_pairing_code(code: &str) -> Result<String> {
             .join(", ");
         bail!("pairing code contains invalid character(s): {invalid_chars}");
     }
-    let normalized = chat94_crypto::normalize_pairing_code(code);
+    let normalized = chat4000_crypto::normalize_pairing_code(code);
     if normalized.len() != 8 {
         bail!("pairing code must normalize to 8 characters");
     }

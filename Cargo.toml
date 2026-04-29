@@ -1,9 +1,9 @@
 [workspace]
 members = [
-    "crates/chat94",
-    "crates/chat94-crypto",
-    "crates/chat94-proto",
-    "crates/chat94-relay",
+    "crates/chat4000",
+    "crates/chat4000-crypto",
+    "crates/chat4000-proto",
+    "crates/chat4000-relay",
 ]
 resolver = "2"
 
@@ -12,8 +12,8 @@ edition = "2024"
 version = "0.1.4"
 license = "GPL-3.0-or-later"
 authors = ["NeonNode Limited"]
-homepage = "https://chat94.com"
-repository = "https://github.com/chat94/chat94-cli"
+homepage = "https://chat4000.com"
+repository = "https://github.com/chat4000/chat4000-cli"
 
 [workspace.dependencies]
 anyhow = "1.0.100"

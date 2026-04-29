@@ -1,8 +1,8 @@
-// chat94
+// chat4000
 // Copyright (C) 2026 NeonNode Limited
 // Licensed under GPL-3.0. See LICENSE file for details.
 
-use chat94_crypto::{
+use chat4000_crypto::{
     decrypt, derive_group_id, derive_pair_proof, derive_pairing_room_id, encrypt,
     generate_group_key, generate_joiner_keypair, generate_pairing_code, normalize_pairing_code,
     unwrap_group_key, wrap_group_key,
@@ -11,7 +11,7 @@ use chat94_crypto::{
 #[test]
 fn encrypt_decrypt_roundtrip() {
     let key = [0x11; 32];
-    let plaintext = b"hello from Chat94";
+    let plaintext = b"hello from Chat4000";
     let encrypted = encrypt(plaintext, &key).unwrap();
     let decrypted = decrypt(&encrypted.nonce, &encrypted.ciphertext, &key).unwrap();
     assert_eq!(decrypted, plaintext);

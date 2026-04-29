@@ -44,19 +44,19 @@ jobs:
           tool: cross
 
       - name: Build release binary
-        # To embed Sentry telemetry in shipped binaries, add CHAT94_SENTRY_DSN
+        # To embed Sentry telemetry in shipped binaries, add CHAT4000_SENTRY_DSN
         # as a repository secret and pass it through here:
         #   env:
-        #     CHAT94_SENTRY_DSN: ${{ secrets.CHAT94_SENTRY_DSN }}
-        run: ${{ matrix.tool }} build --release --target ${{ matrix.target }} -p chat94
+        #     CHAT4000_SENTRY_DSN: ${{ secrets.CHAT4000_SENTRY_DSN }}
+        run: ${{ matrix.tool }} build --release --target ${{ matrix.target }} -p chat4000
 
       - name: Package tarball
         id: package
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
-          archive="chat94-${version}-${{ matrix.target }}.tar.gz"
-          tar -C "target/${{ matrix.target }}/release" -czf "$archive" chat94
+          archive="chat4000-${version}-${{ matrix.target }}.tar.gz"
+          tar -C "target/${{ matrix.target }}/release" -czf "$archive" chat4000
           shasum -a 256 "$archive" > "$archive.sha256"
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
           echo "sha256=$archive.sha256" >> "$GITHUB_OUTPUT"

@@ -1,4 +1,4 @@
-// chat94
+// chat4000
 // Copyright (C) 2026 NeonNode Limited
 // Licensed under GPL-3.0. See LICENSE file for details.
 
@@ -15,7 +15,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 pub const GROUP_KEY_LEN: usize = 32;
 pub const NONCE_LEN: usize = 24;
-pub const PAIR_WRAP_INFO: &[u8] = b"chat94-pair-wrap-v1";
+pub const PAIR_WRAP_INFO: &[u8] = b"chat4000-pair-wrap-v1";
 pub const PAIRING_ROOM_PREFIX: &[u8] = b"pairing-v1:";
 pub const PAIRING_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPRTUVWXYZ2346789";
 

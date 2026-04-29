@@ -1,4 +1,4 @@
-# Chat94 CLI — Product Spec
+# Chat4000 CLI — Product Spec
 
 **Status:** Draft (v0.1)
 **Owner:** @haimbender
@@ -36,13 +36,13 @@ Self-hosted OpenClaw operators who live in a terminal and want chat parity with 
 ### 4.1 Invocation
 
 ```
-chat94                    # start chat; if unpaired, enter interactive pairing
-chat94 pair               # one-shot: pair as joiner (enter code)
-chat94 pair --host        # one-shot: host a pairing (print QR + code)
-chat94 status             # print group id prefix and relay health
-chat94 disconnect         # wipe config, forget group
-chat94 --version
-chat94 --help
+chat4000                    # start chat; if unpaired, enter interactive pairing
+chat4000 pair               # one-shot: pair as joiner (enter code)
+chat4000 pair --host        # one-shot: host a pairing (print QR + code)
+chat4000 status             # print group id prefix and relay health
+chat4000 disconnect         # wipe config, forget group
+chat4000 --version
+chat4000 --help
 ```
 
 ### 4.2 First run (no config)
@@ -50,7 +50,7 @@ chat94 --help
 No error. Drop into the interactive pair flow:
 
 ```
-$ chat94
+$ chat4000
 No group paired yet. Let's pair this device.
 
 Enter pairing code: ABCD-EFGH
@@ -69,15 +69,15 @@ Ask for code, run the joiner side of the pairing protocol, persist group key on 
 
 ### 4.4 Pairing as host (`pair --host` or `/pair`)
 
-Generate a pairing code, open a pairing room as the initiator. Print both a visible code and a terminal QR encoding `chat94://pair?code=XXXX-XXXX`. Auto-detect terminal QR support (unicode block chars); fall back to code-only when the terminal can't render it (non-TTY, limited charset, or explicit `NO_COLOR=1` / `CHAT94_NO_QR=1`).
+Generate a pairing code, open a pairing room as the initiator. Print both a visible code and a terminal QR encoding `chat4000://pair?code=XXXX-XXXX`. Auto-detect terminal QR support (unicode block chars); fall back to code-only when the terminal can't render it (non-TTY, limited charset, or explicit `NO_COLOR=1` / `CHAT4000_NO_QR=1`).
 
 ```
-$ chat94 pair --host
+$ chat4000 pair --host
 
 Pairing code: QZ4K-M7P2       (expires in 5 min)
 
 ▄▄▄▄▄▄▄ ▄ ▄  ▄▄▄▄▄▄▄
-█ ███ █ ▀█▀▀▀ █ ███ █   ← chat94://pair?code=QZ4K-M7P2
+█ ███ █ ▀█▀▀▀ █ ███ █   ← chat4000://pair?code=QZ4K-M7P2
 █ ▀▀▀ █ ▀█▄▀█ █ ▀▀▀ █
 ▀▀▀▀▀▀▀ ▀ ▀ ▀ ▀▀▀▀▀▀▀
 
@@ -112,7 +112,7 @@ before the await point, so the borrow at line 45 no longer holds…
 
 ### 4.6 Input
 
-Powered by `reedline`. Multi-line input via trailing `\`, `Shift+Enter`, or `Option+Enter` where the terminal supports it. Pasted multi-line content is kept as a single message. Input history stored in `$XDG_DATA_HOME/chat94/input_history` for up-arrow recall. When you scroll the transcript with the mouse or page keys, `Up` / `Down` stay in transcript navigation until you jump back to the bottom.
+Powered by `reedline`. Multi-line input via trailing `\`, `Shift+Enter`, or `Option+Enter` where the terminal supports it. Pasted multi-line content is kept as a single message. Input history stored in `$XDG_DATA_HOME/chat4000/input_history` for up-arrow recall. When you scroll the transcript with the mouse or page keys, `Up` / `Down` stay in transcript navigation until you jump back to the bottom.
 
 ### 4.7 Slash commands (in-session)
 
@@ -121,27 +121,27 @@ Powered by `reedline`. Multi-line input via trailing `\`, `Shift+Enter`, or `Opt
 | `/help` | List commands |
 | `/status` | Connection info (group id prefix, latency) |
 | `/pair` | Host an inline pairing to add another device (prints QR, waits) |
-| `/disconnect` | Wipe config, exit. Same as `chat94 disconnect` |
+| `/disconnect` | Wipe config, exit. Same as `chat4000 disconnect` |
 | `/clear` | Clear terminal screen. Does not touch history |
 | `/reset-history` | Wipe local transcript; keeps pairing |
 | `/quit` | Exit |
 
 ### 4.8 History
 
-Always-on. Transcript persisted as append-only JSONL at `$XDG_DATA_HOME/chat94/history.jsonl`. On startup, the last N messages (default 50) are replayed to give context. `/reset-history` nukes the file. No retention limit in v1 — we rotate later if it becomes a problem.
+Always-on. Transcript persisted as append-only JSONL at `$XDG_DATA_HOME/chat4000/history.jsonl`. On startup, the last N messages (default 50) are replayed to give context. `/reset-history` nukes the file. No retention limit in v1 — we rotate later if it becomes a problem.
 
 ## 5. Architecture
 
 ### 5.1 Crate layout (Cargo workspace)
 
 ```
-chat94-cli-rs/
+chat4000-cli-rs/
 ├── Cargo.toml                   (workspace)
 ├── crates/
-│   ├── chat94-proto/       relay wire format — RelayMessage, InnerMessage
-│   ├── chat94-crypto/      XChaCha20-Poly1305, X25519 pairing, proof, KDF
-│   ├── chat94-relay/       WebSocket client, reconnect, heartbeat, hello
-│   └── chat94/             CLI binary — TUI loop, slash commands, config
+│   ├── chat4000-proto/       relay wire format — RelayMessage, InnerMessage
+│   ├── chat4000-crypto/      XChaCha20-Poly1305, X25519 pairing, proof, KDF
+│   ├── chat4000-relay/       WebSocket client, reconnect, heartbeat, hello
+│   └── chat4000/             CLI binary — TUI loop, slash commands, config
 ├── docs/
 │   └── product.md               (this file)
 └── README.md
@@ -174,19 +174,19 @@ Three library crates so a future agent/tool-use binary can reuse proto + crypto 
 XDG, same shape as the Swift app's `GroupConfig` for future import.
 
 ```
-$XDG_CONFIG_HOME/chat94/     (fallback ~/.config/chat94)
+$XDG_CONFIG_HOME/chat4000/     (fallback ~/.config/chat4000)
 └── group-config.json             { groupKeyBase64 }   mode 0600
 
 ### 5.4 Relay endpoint
 
-- WebSocket URL: `wss://relay.chat94.com/ws`
-- Health URL: `https://relay.chat94.com/health`
-- Host: `relay.chat94.com`
+- WebSocket URL: `wss://relay.chat4000.com/ws`
+- Health URL: `https://relay.chat4000.com/health`
+- Host: `relay.chat4000.com`
 - Port: `443`
 - Path: `/ws`
 - TLS: `true`
 
-$XDG_DATA_HOME/chat94/       (fallback ~/.local/share/chat94)
+$XDG_DATA_HOME/chat4000/       (fallback ~/.local/share/chat4000)
 ├── history.jsonl                 transcript, append-only
 └── input_history                 reedline input ring
 ```
@@ -210,14 +210,14 @@ Byte-for-byte identical to `RelayCrypto.swift`:
 
 - **Group ID:** `hex(sha256(group_key))`
 - **Pair proof:** `sha256(code || 0x00 || a_salt || 0x00 || b_pub || 0x00 || label)` where label ∈ {`"A"`, `"B"`}
-- **Wrap key:** `sha256(x25519_ecdh_shared || "chat94-pair-wrap-v1")`
+- **Wrap key:** `sha256(x25519_ecdh_shared || "chat4000-pair-wrap-v1")`
 - **Message:** `nonce = random(24); ct = xchacha20poly1305_encrypt(group_key, nonce, json(inner))`, wire carries `base64(nonce)` and `base64(ct)`
 
-Interop tests in `chat94-crypto/tests/` run Swift-generated fixtures through the Rust path and vice versa.
+Interop tests in `chat4000-crypto/tests/` run Swift-generated fixtures through the Rust path and vice versa.
 
 ## 6. Protocol parity
 
-`chat94-proto` implements every message the Swift client knows:
+`chat4000-proto` implements every message the Swift client knows:
 
 - Pairing: `pair_open`, `pair_ready`, `pair_data {hello|join|proof_b|grant}`, `pair_complete`, `pair_error`
 - Auth: `hello`, `hello_ok`, `hello_error`
@@ -231,23 +231,23 @@ Inner message types parsed/emitted: `text`, `text_delta`, `text_end`, `status`, 
 
 ### 7.1 Homebrew tap (day one)
 
-- Publish a `chat94/homebrew-tap` repo with a formula pointing at GitHub Release tarballs.
-- Users: `brew install chat94/tap/chat94`.
+- Publish a `chat4000/homebrew-tap` repo with a formula pointing at GitHub Release tarballs.
+- Users: `brew install chat4000/tap/chat4000`.
 - Release CI (GitHub Actions): build macOS universal (arm64 + x86_64) and Linux (x86_64, aarch64) tarballs, sign, publish release, bump formula SHA.
 
 ### 7.2 `curl | sh` installer (day one)
 
-- `curl -sSL https://chat94.com/install.sh | sh`.
+- `curl -sSL https://chat4000.com/install.sh | sh`.
 - ~30-line POSIX shell: detect OS/arch, download matching tarball from the latest release, install to `/usr/local/bin` (fallback `~/.local/bin`), verify signature.
 - Script lives in the release repo; domain is a redirect to the raw GitHub URL so URL doesn't rot.
 
 ### 7.3 crates.io (free, day one)
 
-- `cargo install chat94` for the Rust crowd. No approval process.
+- `cargo install chat4000` for the Rust crowd. No approval process.
 
 ### 7.4 Homebrew core (later)
 
-- Once stable with real adoption: submit to `homebrew-core`. Gets users `brew install chat94` with no tap prefix, but takes review time and is stricter about versioning.
+- Once stable with real adoption: submit to `homebrew-core`. Gets users `brew install chat4000` with no tap prefix, but takes review time and is stricter about versioning.
 
 ### 7.5 Not pursuing
 
@@ -280,7 +280,7 @@ TUI holds the terminal indefinitely. If laptop sleeps for hours, backoff is boun
 
 ### 9.4 Binary name collision
 
-`chat94` is unclaimed on crates.io and Homebrew at time of writing. Confirm again before first release.
+`chat4000` is unclaimed on crates.io and Homebrew at time of writing. Confirm again before first release.
 
 ### 9.5 Telemetry
 
@@ -290,17 +290,17 @@ Swift app sends Sentry + PostHog. Proposal for CLI: **no telemetry in v1.** Reco
 
 | Milestone | Scope | Estimate |
 |---|---|---|
-| **M0 — Proto & crypto foundation** | `chat94-proto` + `chat94-crypto` crates with full type coverage and interop tests against Swift fixtures | 3–4 days |
-| **M1 — Relay client** | `chat94-relay` with connect / hello / heartbeat / reconnect; integration test against a local relay stub | 3–4 days |
-| **M2 — CLI chat MVP** | `chat94` binary: config load/save, `reedline` input, streaming render, slash commands (`/help`, `/clear`, `/quit`, `/status`, `/reset-history`). Manual E2E against real relay + OpenClaw plugin | 4–5 days |
-| **M3 — Pairing** | Joiner flow, host flow, terminal QR, auto-detect, `chat94 disconnect` / `/disconnect` | 3 days |
+| **M0 — Proto & crypto foundation** | `chat4000-proto` + `chat4000-crypto` crates with full type coverage and interop tests against Swift fixtures | 3–4 days |
+| **M1 — Relay client** | `chat4000-relay` with connect / hello / heartbeat / reconnect; integration test against a local relay stub | 3–4 days |
+| **M2 — CLI chat MVP** | `chat4000` binary: config load/save, `reedline` input, streaming render, slash commands (`/help`, `/clear`, `/quit`, `/status`, `/reset-history`). Manual E2E against real relay + OpenClaw plugin | 4–5 days |
+| **M3 — Pairing** | Joiner flow, host flow, terminal QR, auto-detect, `chat4000 disconnect` / `/disconnect` | 3 days |
 | **M4 — Polish & release** | Typing + thinking indicators, status line, `status` subcommand, GitHub Actions release pipeline, Homebrew tap, install.sh, crates.io publish | 2–3 days |
 
 **Total:** roughly 3 weeks solo.
 
 ## 11. Success criteria (v1)
 
-- `brew install chat94/tap/chat94 && chat94` → interactive pair → working chat on macOS arm64 and Linux x86_64.
+- `brew install chat4000/tap/chat4000 && chat4000` → interactive pair → working chat on macOS arm64 and Linux x86_64.
 - Interop: a message sent from the CLI is correctly decrypted and displayed in the Swift iOS app, and vice versa.
 - Reconnect survives a 60-second network drop without user intervention.
 - Crypto interop tests green: 100% of Swift test vectors decoded by Rust, and all Rust-encoded messages decoded by Swift.

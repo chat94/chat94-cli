@@ -1,13 +1,13 @@
-// chat94
+// chat4000
 // Copyright (C) 2026 NeonNode Limited
 // Licensed under GPL-3.0. See LICENSE file for details.
 
-use chat94_proto::{
+use chat4000_proto::{
     ChallengeOkPayload, ClientRole, Envelope, IncomingMessage, InnerMessage, InnerMessageType,
     MessageType, PairDataMessage, PairingRole, RelayOutgoing, SenderInfo, SenderRole,
     WrappedGroupKey,
 };
-use chat94_proto::{HelloOkPayload, VersionPolicy};
+use chat4000_proto::{HelloOkPayload, VersionPolicy};
 use serde_json::Value;
 
 #[test]
@@ -15,7 +15,7 @@ fn hello_builder_produces_expected_fields() {
     let json = RelayOutgoing::hello(
         "abc123",
         Some("token-1".into()),
-        Some("com.neonnode.chat94app.dev".into()),
+        Some("com.neonnode.chat4000app.dev".into()),
         Some("1.2.3".into()),
     )
     .unwrap();
@@ -25,7 +25,7 @@ fn hello_builder_produces_expected_fields() {
     assert_eq!(object["payload"]["role"], "app");
     assert_eq!(object["payload"]["group_id"], "abc123");
     assert_eq!(object["payload"]["device_token"], "token-1");
-    assert_eq!(object["payload"]["app_id"], "com.neonnode.chat94app.dev");
+    assert_eq!(object["payload"]["app_id"], "com.neonnode.chat4000app.dev");
     assert_eq!(object["payload"]["app_version"], "1.2.3");
 }
 
@@ -160,7 +160,7 @@ fn inner_message_serializes_with_expected_shape() {
             device_id: "device-1".into(),
             device_name: "Terminal".into(),
             app_version: Some("1.0.3".into()),
-            bundle_id: Some("com.neonnode.chat94app".into()),
+            bundle_id: Some("com.neonnode.chat4000app".into()),
         },
     );
     let value = serde_json::to_value(inner).unwrap();
@@ -170,7 +170,7 @@ fn inner_message_serializes_with_expected_shape() {
     assert_eq!(value["from"]["device_id"], "device-1");
     assert_eq!(value["from"]["device_name"], "Terminal");
     assert_eq!(value["from"]["app_version"], "1.0.3");
-    assert_eq!(value["from"]["bundle_id"], "com.neonnode.chat94app");
+    assert_eq!(value["from"]["bundle_id"], "com.neonnode.chat4000app");
     assert!(value["id"].as_str().is_some());
 }
 
@@ -179,7 +179,7 @@ fn inner_message_accepts_missing_sender_metadata() {
     let json = r#"{
         "t":"text",
         "id":"00000000-0000-0000-0000-000000000001",
-        "from":{"role":"plugin","device_id":"plugin-1","device_name":"OpenClaw chat94"},
+        "from":{"role":"plugin","device_id":"plugin-1","device_name":"OpenClaw chat4000"},
         "body":{"text":"hello"},
         "ts":1710000000000
     }"#;
@@ -189,7 +189,7 @@ fn inner_message_accepts_missing_sender_metadata() {
 
     assert_eq!(sender.role, SenderRole::Plugin);
     assert_eq!(sender.device_id, "plugin-1");
-    assert_eq!(sender.device_name, "OpenClaw chat94");
+    assert_eq!(sender.device_name, "OpenClaw chat4000");
     assert_eq!(sender.app_version, None);
     assert_eq!(sender.bundle_id, None);
 }

@@ -262,14 +262,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "chat94"
+name = "chat4000"
 version = "0.1.4"
 dependencies = [
  "anyhow",
  "base64",
- "chat94-crypto",
- "chat94-proto",
- "chat94-relay",
+ "chat4000-crypto",
+ "chat4000-proto",
+ "chat4000-relay",
  "clap",
  "crossterm 0.29.0",
  "dirs",
@@ -291,7 +291,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "chat94-crypto"
+name = "chat4000-crypto"
 version = "0.1.4"
 dependencies = [
  "base64",
@@ -305,7 +305,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "chat94-proto"
+name = "chat4000-proto"
 version = "0.1.4"
 dependencies = [
  "serde",
@@ -315,13 +315,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "chat94-relay"
+name = "chat4000-relay"
 version = "0.1.4"
 dependencies = [
  "anyhow",
  "base64",
- "chat94-crypto",
- "chat94-proto",
+ "chat4000-crypto",
+ "chat4000-proto",
  "futures-util",
  "rustls",
  "serde_json",

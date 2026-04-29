@@ -1,4 +1,4 @@
-# Contributing to chat94
+# Contributing to chat4000
 
 Thanks for your interest in contributing!
 
@@ -6,4 +6,4 @@ Before we can merge your pull request, you'll need to sign our Contributor Licen
 
 The CLA ensures NeonNode Limited has the rights to use your contribution in the project, including in future versions that may be released under different terms.
 
-For questions, reach out at contact@chat94.com.
+For questions, reach out at contact@chat4000.com.

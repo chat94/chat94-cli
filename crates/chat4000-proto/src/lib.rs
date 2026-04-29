@@ -1,4 +1,4 @@
-// chat94
+// chat4000
 // Copyright (C) 2026 NeonNode Limited
 // Licensed under GPL-3.0. See LICENSE file for details.
 
@@ -10,7 +10,7 @@ use uuid::Uuid;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_MESSAGE_SIZE: usize = 65_536;
 pub const HEARTBEAT_INTERVAL_SECS: u64 = 30;
-pub const DEFAULT_RELAY_URL: &str = "wss://relay.chat94.com/ws";
+pub const DEFAULT_RELAY_URL: &str = "wss://relay.chat4000.com/ws";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

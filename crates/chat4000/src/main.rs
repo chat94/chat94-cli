@@ -1,4 +1,4 @@
-// chat94
+// chat4000
 // Copyright (C) 2026 NeonNode Limited
 // Licensed under GPL-3.0. See LICENSE file for details.
 
@@ -14,12 +14,12 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use chat94_crypto::{
+use chat4000_crypto::{
     GROUP_KEY_LEN, PAIRING_CODE_ALPHABET, derive_group_id, derive_pairing_room_id,
     generate_group_key, generate_pairing_code, normalize_pairing_code,
 };
-use chat94_proto::{DEFAULT_RELAY_URL, SenderInfo, SenderRole, VersionPolicy};
-use chat94_relay::{
+use chat4000_proto::{DEFAULT_RELAY_URL, SenderInfo, SenderRole, VersionPolicy};
+use chat4000_relay::{
     PairHostOptions, PairHostStatus, PairJoinOptions, SessionEvent, connect_session,
     host_pairing_session, join_pairing_session,
 };
@@ -51,16 +51,16 @@ use uuid::Uuid;
 static EXCEPTION_LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static LOG_GUARDS: OnceLock<Vec<WorkerGuard>> = OnceLock::new();
 static TELEMETRY_ENABLED: OnceLock<bool> = OnceLock::new();
-const DEFAULT_APP_ID: &str = "com.neonnode.chat94cli";
-const CLI_BUNDLE_ID: &str = "com.neonnode.chat94cli";
+const DEFAULT_APP_ID: &str = "com.neonnode.chat4000cli";
+const CLI_BUNDLE_ID: &str = "com.neonnode.chat4000cli";
 const MIN_PLUGIN_VERSION: &str = "0.1.0";
-const BUILT_IN_SENTRY_DSN: Option<&str> = option_env!("CHAT94_SENTRY_DSN");
-const PRIVACY_POLICY_URL: &str = "https://chat94.com/privacy";
-const SUPPORT_URL: &str = "https://t.me/chat94official";
+const BUILT_IN_SENTRY_DSN: Option<&str> = option_env!("CHAT4000_SENTRY_DSN");
+const PRIVACY_POLICY_URL: &str = "https://chat4000.com/privacy";
+const SUPPORT_URL: &str = "https://t.me/chat4000official";
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "chat94",
+    name = "chat4000",
     version,
     about = "Encrypted terminal client for OpenClaw agents"
 )]
@@ -269,9 +269,9 @@ struct TelemetryState {
 
 impl TelemetryState {
     fn resolve(cli: &Cli) -> Self {
-        let config_dir = dirs::home_dir().map(|home| home.join(".config").join("chat94"));
+        let config_dir = dirs::home_dir().map(|home| home.join(".config").join("chat4000"));
         let disabled_by_flag = cli.no_telemetry;
-        let disabled_by_env = env_truthy("CHAT94_TELEMETRY_DISABLED");
+        let disabled_by_env = env_truthy("CHAT4000_TELEMETRY_DISABLED");
         let persistent_enabled = config_dir
             .as_ref()
             .and_then(|dir| read_bool_file(&dir.join("telemetry-enabled")));
@@ -357,12 +357,12 @@ fn cmd_telemetry(args: TelemetryArgs, telemetry: &TelemetryState) -> Result<()> 
                 .context("could not resolve telemetry config path")?;
             match write_private_text(&path, "false\n") {
                 Ok(()) => {
-                    println!("Telemetry disabled. No data will be sent to chat94.");
-                    println!("Re-enable: chat94 telemetry enable");
+                    println!("Telemetry disabled. No data will be sent to chat4000.");
+                    println!("Re-enable: chat4000 telemetry enable");
                 }
                 Err(err) => {
                     println!("Telemetry could not be disabled persistently.");
-                    println!("Use CHAT94_TELEMETRY_DISABLED=1 or --no-telemetry.");
+                    println!("Use CHAT4000_TELEMETRY_DISABLED=1 or --no-telemetry.");
                     println!("Reason: {err}");
                 }
             }
@@ -371,7 +371,7 @@ fn cmd_telemetry(args: TelemetryArgs, telemetry: &TelemetryState) -> Result<()> 
             let reason = if telemetry.disabled_by_flag {
                 "disabled for this invocation by --no-telemetry"
             } else if telemetry.disabled_by_env {
-                "disabled by CHAT94_TELEMETRY_DISABLED"
+                "disabled by CHAT4000_TELEMETRY_DISABLED"
             } else if telemetry.persistent_enabled == Some(false) {
                 "disabled in config"
             } else if telemetry.persistent_enabled == Some(true) {
@@ -389,10 +389,10 @@ fn cmd_telemetry(args: TelemetryArgs, telemetry: &TelemetryState) -> Result<()> 
             );
             println!("Reason: {reason}");
             if telemetry.enabled {
-                println!("Disable: chat94 telemetry disable");
-                println!("Or set CHAT94_TELEMETRY_DISABLED=1");
+                println!("Disable: chat4000 telemetry disable");
+                println!("Or set CHAT4000_TELEMETRY_DISABLED=1");
             } else {
-                println!("Enable: chat94 telemetry enable");
+                println!("Enable: chat4000 telemetry enable");
             }
         }
     }
@@ -401,7 +401,7 @@ fn cmd_telemetry(args: TelemetryArgs, telemetry: &TelemetryState) -> Result<()> 
 
 fn print_telemetry_notice() {
     eprintln!(
-        "chat94 v{}\n\nAnonymous error reports help us fix bugs faster. We collect crash data\nand error traces -- never message content, prompts, command arguments,\nor environment variables.\n\nTo opt out:\n  chat94 telemetry disable\n  or set CHAT94_TELEMETRY_DISABLED=1\n\nPrivacy policy: {PRIVACY_POLICY_URL}\n",
+        "chat4000 v{}\n\nAnonymous error reports help us fix bugs faster. We collect crash data\nand error traces -- never message content, prompts, command arguments,\nor environment variables.\n\nTo opt out:\n  chat4000 telemetry disable\n  or set CHAT4000_TELEMETRY_DISABLED=1\n\nPrivacy policy: {PRIVACY_POLICY_URL}\n",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -410,7 +410,7 @@ fn init_sentry(telemetry: &TelemetryState) -> Option<sentry::ClientInitGuard> {
     if !telemetry.enabled {
         return None;
     }
-    let dsn = env::var("CHAT94_SENTRY_DSN")
+    let dsn = env::var("CHAT4000_SENTRY_DSN")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -418,7 +418,7 @@ fn init_sentry(telemetry: &TelemetryState) -> Option<sentry::ClientInitGuard> {
     let guard = sentry::init((
         dsn,
         sentry::ClientOptions {
-            release: Some(format!("chat94@{}", env!("CARGO_PKG_VERSION")).into()),
+            release: Some(format!("chat4000@{}", env!("CARGO_PKG_VERSION")).into()),
             environment: Some(
                 env::var("NODE_ENV")
                     .unwrap_or_else(|_| "production".to_string())
@@ -453,7 +453,7 @@ fn flush_sentry(guard: &Option<sentry::ClientInitGuard>) {
 }
 
 fn sentry_sample_rate() -> f32 {
-    env::var("CHAT94_SENTRY_SAMPLE_RATE")
+    env::var("CHAT4000_SENTRY_SAMPLE_RATE")
         .ok()
         .and_then(|value| value.parse::<f32>().ok())
         .map(|value| value.clamp(0.0, 1.0))
@@ -591,7 +591,7 @@ fn usable_log_dir(preferred: PathBuf) -> PathBuf {
     if can_write_to_dir(&preferred) {
         return preferred;
     }
-    let fallback = env::temp_dir().join("chat94-logs");
+    let fallback = env::temp_dir().join("chat4000-logs");
     let _ = can_write_to_dir(&fallback);
     fallback
 }
@@ -748,14 +748,14 @@ async fn cmd_status(paths: &AppPaths) -> Result<()> {
         match evaluate_version_policy(env!("CARGO_PKG_VERSION"), policy) {
             VersionPolicyAction::HardBlock { min_version } => {
                 println!(
-                    "Update required: chat94 {min_version} or newer is needed to use this relay."
+                    "Update required: chat4000 {min_version} or newer is needed to use this relay."
                 );
             }
             VersionPolicyAction::SoftNag { recommended } => {
                 if let Some(version) = recommended {
-                    println!("Update available: chat94 {version} is recommended.");
+                    println!("Update available: chat4000 {version} is recommended.");
                 } else {
-                    println!("Update available: a newer chat94 version is recommended.");
+                    println!("Update available: a newer chat4000 version is recommended.");
                 }
             }
             VersionPolicyAction::None => {}
@@ -783,7 +783,7 @@ fn cmd_disconnect(paths: &AppPaths) -> Result<()> {
 fn cmd_support() -> Result<()> {
     println!("Support: {SUPPORT_URL}");
     match open_support_url() {
-        Ok(()) => println!("Opened chat94 official Telegram support."),
+        Ok(()) => println!("Opened chat4000 official Telegram support."),
         Err(err) => println!("Could not open browser automatically: {err}"),
     }
     Ok(())
@@ -1008,7 +1008,7 @@ fn print_pairing_host_screen(code: &str) {
 
 fn pairing_host_lines(code: &str) -> Vec<String> {
     let room_id = derive_pairing_room_id(code);
-    let invite_uri = format!("chat94://pair?code={code}");
+    let invite_uri = format!("chat4000://pair?code={code}");
     let mut lines = vec![
         String::new(),
         String::new(),
@@ -1033,7 +1033,7 @@ fn pairing_host_lines(code: &str) -> Vec<String> {
 }
 
 fn render_qr_string_if_possible(uri: &str) -> Option<String> {
-    if std::env::var_os("CHAT94_NO_QR").is_some()
+    if std::env::var_os("CHAT4000_NO_QR").is_some()
         || std::env::var_os("NO_COLOR").is_some()
         || !io::stdout().is_tty()
     {
@@ -1071,7 +1071,7 @@ fn pairing_status_line(status: PairHostStatus) -> String {
 async fn run_host_pairing_with_ctrl_c<F>(
     opts: PairHostOptions,
     on_status: F,
-) -> Result<chat94_relay::PairHostResult>
+) -> Result<chat4000_relay::PairHostResult>
 where
     F: FnMut(PairHostStatus, &str) + Send + 'static,
 {
@@ -1098,7 +1098,7 @@ async fn run_host_pairing_in_chat(
     transcript: &mut Vec<String>,
     render_state: &mut ChatRenderState,
     input_state: &mut InputState,
-) -> Result<chat94_relay::PairHostResult> {
+) -> Result<chat4000_relay::PairHostResult> {
     let (status_tx, mut status_rx) = mpsc::unbounded_channel::<PairHostStatus>();
     let mut pairing_task = tokio::spawn(async move {
         host_pairing_session(opts, move |status, _| {
@@ -1294,7 +1294,7 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
                                             );
                                             push_transcript_line(
                                                 &mut transcript,
-                                                "Docs: https://chat94.com/help".to_string(),
+                                                "Docs: https://chat4000.com/help".to_string(),
                                             );
                                             push_transcript_line(
                                                 &mut transcript,
@@ -1309,7 +1309,7 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
                                             match open_support_url() {
                                                 Ok(()) => push_transcript_line(
                                                     &mut transcript,
-                                                    "Opened chat94 official Telegram support.".to_string(),
+                                                    "Opened chat4000 official Telegram support.".to_string(),
                                                 ),
                                                 Err(err) => push_transcript_line(
                                                     &mut transcript,
@@ -1461,7 +1461,7 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
                             message.from.as_ref(),
                         );
                         match message.t {
-                            chat94_proto::InnerMessageType::Text => {
+                            chat4000_proto::InnerMessageType::Text => {
                                 if let Some(text) = message.body.get("text").and_then(|v| v.as_str()) {
                                     let rendered = render_chat_line(message.from.as_ref(), text);
                                     render_state.clear_busy();
@@ -1474,14 +1474,14 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
                                     ui.render(&transcript, &render_state, &input_state)?;
                                 }
                             }
-                            chat94_proto::InnerMessageType::TextDelta => {
+                            chat4000_proto::InnerMessageType::TextDelta => {
                                 let id = message.id.to_string();
                                 let delta = message.body.get("delta").and_then(|v| v.as_str()).unwrap_or_default();
                                 debug!(stream_id = %id, delta_len = delta.len(), "received text_delta");
                                 render_state.update_stream_delta(id, message.from.clone(), delta);
                                 ui.render(&transcript, &render_state, &input_state)?;
                             }
-                            chat94_proto::InnerMessageType::TextEnd => {
+                            chat4000_proto::InnerMessageType::TextEnd => {
                                 let id = message.id.to_string();
                                 let text = message.body.get("text").and_then(|v| v.as_str()).unwrap_or_default();
                                 let reset = message.body.get("reset").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -1499,7 +1499,7 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
                                 }
                                 ui.render(&transcript, &render_state, &input_state)?;
                             }
-                            chat94_proto::InnerMessageType::Status => {
+                            chat4000_proto::InnerMessageType::Status => {
                                 if let Some(status) = message.body.get("status").and_then(|v| v.as_str()) {
                                     debug!(status = %status, "received status message");
                                     match status {
@@ -1519,11 +1519,11 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
                                     }
                                 }
                             }
-                            chat94_proto::InnerMessageType::Image => {
+                            chat4000_proto::InnerMessageType::Image => {
                                 push_transcript_line(&mut transcript, "[received image message]".to_string());
                                 ui.render(&transcript, &render_state, &input_state)?;
                             }
-                            chat94_proto::InnerMessageType::Audio => {
+                            chat4000_proto::InnerMessageType::Audio => {
                                 push_transcript_line(&mut transcript, "[received audio message]".to_string());
                                 ui.render(&transcript, &render_state, &input_state)?;
                             }
@@ -1542,7 +1542,7 @@ async fn connect_with_retries(
     group_id: &str,
     group_key: Vec<u8>,
     sender: Option<SenderInfo>,
-) -> Result<chat94_relay::RelaySession> {
+) -> Result<chat4000_relay::RelaySession> {
     let mut delay = 2u64;
     loop {
         match connect_session(
@@ -2980,7 +2980,7 @@ fn maybe_push_plugin_update_warning(
         return;
     }
     state.plugin_update_warning_shown = true;
-    let package = sender.bundle_id.as_deref().unwrap_or("chat94 plugin");
+    let package = sender.bundle_id.as_deref().unwrap_or("chat4000 plugin");
     push_transcript_line(
         transcript,
         format!(
@@ -3068,15 +3068,15 @@ fn handle_version_policy_pre_chat(
                 .map(|v| format!(" Latest: {v}."))
                 .unwrap_or_default();
             Some(format!(
-                "Update required: chat94 {min_version} or newer is needed to use this relay.{latest}\nUpgrade with `brew upgrade chat94` or `cargo install chat94`."
+                "Update required: chat4000 {min_version} or newer is needed to use this relay.{latest}\nUpgrade with `brew upgrade chat4000` or `cargo install chat4000`."
             ))
         }
         VersionPolicyAction::SoftNag { recommended } => {
             let now_ms = unix_ms();
             if should_show_soft_nag(paths, recommended.as_deref(), now_ms) {
                 let line = match recommended.as_deref() {
-                    Some(version) => format!("Update available: chat94 {version} is recommended."),
-                    None => "Update available: a newer chat94 version is recommended.".to_string(),
+                    Some(version) => format!("Update available: chat4000 {version} is recommended."),
+                    None => "Update available: a newer chat4000 version is recommended.".to_string(),
                 };
                 println!("{line}");
                 if let Err(err) = paths.write_update_nag(&UpdateNagRecord {
@@ -3184,10 +3184,10 @@ impl AppPaths {
     fn resolve() -> Result<Self> {
         let config_dir = dirs::config_dir()
             .context("could not resolve XDG config directory")?
-            .join("chat94");
+            .join("chat4000");
         let data_dir = dirs::data_dir()
             .context("could not resolve XDG data directory")?
-            .join("chat94");
+            .join("chat4000");
         fs::create_dir_all(&config_dir)
             .with_context(|| format!("failed to create {}", config_dir.display()))?;
         fs::create_dir_all(&data_dir)
@@ -3401,7 +3401,7 @@ impl AppPaths {
 }
 
 fn detect_device_name() -> String {
-    std::env::var("CHAT94_DEVICE_NAME")
+    std::env::var("CHAT4000_DEVICE_NAME")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -3417,7 +3417,7 @@ fn detect_device_name() -> String {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
         })
-        .unwrap_or_else(|| "Chat94 CLI".to_string())
+        .unwrap_or_else(|| "Chat4000 CLI".to_string())
 }
 
 fn write_private_json(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -3521,7 +3521,7 @@ mod tests {
 
     #[test]
     fn app_paths_detect_local_state_presence() {
-        let temp_root = std::env::temp_dir().join(format!("chat94-test-{}", unix_ms()));
+        let temp_root = std::env::temp_dir().join(format!("chat4000-test-{}", unix_ms()));
         fs::create_dir_all(&temp_root).unwrap();
         let paths = test_paths(&temp_root);
 
@@ -3652,7 +3652,7 @@ mod tests {
 
     #[test]
     fn soft_nag_shown_when_no_record_exists() {
-        let temp_root = std::env::temp_dir().join(format!("chat94-nag-test-{}", unix_ms()));
+        let temp_root = std::env::temp_dir().join(format!("chat4000-nag-test-{}", unix_ms()));
         fs::create_dir_all(&temp_root).unwrap();
         let paths = test_paths(&temp_root);
         assert!(should_show_soft_nag(&paths, Some("1.2.0"), 0));
@@ -3661,7 +3661,7 @@ mod tests {
 
     #[test]
     fn soft_nag_throttled_within_30_days() {
-        let temp_root = std::env::temp_dir().join(format!("chat94-nag-test-{}", unix_ms() + 1));
+        let temp_root = std::env::temp_dir().join(format!("chat4000-nag-test-{}", unix_ms() + 1));
         fs::create_dir_all(&temp_root).unwrap();
         let paths = test_paths(&temp_root);
         let now = unix_ms();
@@ -3682,7 +3682,7 @@ mod tests {
 
     #[test]
     fn soft_nag_resets_when_recommended_version_changes() {
-        let temp_root = std::env::temp_dir().join(format!("chat94-nag-test-{}", unix_ms() + 2));
+        let temp_root = std::env::temp_dir().join(format!("chat4000-nag-test-{}", unix_ms() + 2));
         fs::create_dir_all(&temp_root).unwrap();
         let paths = test_paths(&temp_root);
         let now = unix_ms();
@@ -3916,7 +3916,7 @@ mod tests {
 
     #[test]
     fn read_history_skips_invalid_jsonl_entries() -> Result<()> {
-        let temp_root = std::env::temp_dir().join(format!("chat94-history-test-{}", unix_ms()));
+        let temp_root = std::env::temp_dir().join(format!("chat4000-history-test-{}", unix_ms()));
         fs::create_dir_all(&temp_root)?;
         let paths = test_paths(&temp_root);
         fs::write(
