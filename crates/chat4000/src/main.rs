@@ -42,9 +42,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{
-    EnvFilter, Layer, filter::filter_fn, fmt, layer::SubscriberExt, util::SubscriberInitExt,
-};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use uuid::Uuid;
 
@@ -537,46 +535,34 @@ fn load_or_create_install_id(config_dir: &Path) -> Result<String> {
     Ok(install_id)
 }
 
+const LOG_FILE_NAME: &str = "chat4000.log";
+const LOG_MAX_BYTES: usize = 10 * 1024 * 1024;
+
 fn init_tracing(cli: &Cli, paths: &AppPaths) {
+    use file_rotate::{ContentLimit, FileRotate, compression::Compression, suffix::AppendCount};
+
     let preferred_log_dir = cli.log_dir.clone().unwrap_or_else(|| paths.log_dir.clone());
     let log_dir = usable_log_dir(preferred_log_dir);
-    let info_appender = tracing_appender::rolling::never(&log_dir, "info.log");
-    let debug_appender = tracing_appender::rolling::never(&log_dir, "debug.log");
-    let exception_appender = tracing_appender::rolling::never(&log_dir, "exceptions.log");
-    let (info_writer, info_guard) = tracing_appender::non_blocking(info_appender);
-    let (debug_writer, debug_guard) = tracing_appender::non_blocking(debug_appender);
-    let (exception_writer, exception_guard) = tracing_appender::non_blocking(exception_appender);
-    let _ = EXCEPTION_LOG_PATH.set(log_dir.join("exceptions.log"));
-    let _ = LOG_GUARDS.set(vec![info_guard, debug_guard, exception_guard]);
+    let log_path = log_dir.join(LOG_FILE_NAME);
+
+    let rotating = FileRotate::new(
+        &log_path,
+        AppendCount::new(0),
+        ContentLimit::Bytes(LOG_MAX_BYTES),
+        Compression::None,
+        None,
+    );
+    let (writer, guard) = tracing_appender::non_blocking(rotating);
+    let _ = EXCEPTION_LOG_PATH.set(log_path.clone());
+    let _ = LOG_GUARDS.set(vec![guard]);
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| match cli.log_level {
         LogLevel::Info => EnvFilter::new("info"),
         LogLevel::Debug => EnvFilter::new("debug"),
     });
 
-    let info_layer = fmt::layer()
-        .with_ansi(false)
-        .with_writer(info_writer)
-        .with_filter(filter_fn(|meta| *meta.level() >= tracing::Level::INFO));
-
-    let debug_enabled = cli.log_level == LogLevel::Debug;
-    let debug_layer = fmt::layer()
-        .with_ansi(false)
-        .with_writer(debug_writer)
-        .with_filter(filter_fn(move |meta| {
-            debug_enabled && *meta.level() >= tracing::Level::DEBUG
-        }));
-
-    let exception_layer = fmt::layer()
-        .with_ansi(false)
-        .with_writer(exception_writer)
-        .with_filter(filter_fn(|meta| *meta.level() == tracing::Level::ERROR));
-
-    let subscriber = tracing_subscriber::registry()
-        .with(env_filter)
-        .with(info_layer)
-        .with(debug_layer)
-        .with(exception_layer);
+    let log_layer = fmt::layer().with_ansi(false).with_writer(writer);
+    let subscriber = tracing_subscriber::registry().with(env_filter).with(log_layer);
 
     if cli.stdout_logs {
         subscriber.with(fmt::layer()).init();
@@ -584,7 +570,7 @@ fn init_tracing(cli: &Cli, paths: &AppPaths) {
         subscriber.init();
     }
 
-    info!(log_dir = %log_dir.display(), log_level = ?cli.log_level, stdout_logs = cli.stdout_logs, "logging initialized");
+    info!(log_path = %log_path.display(), log_level = ?cli.log_level, stdout_logs = cli.stdout_logs, "logging initialized");
 }
 
 fn usable_log_dir(preferred: PathBuf) -> PathBuf {

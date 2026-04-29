@@ -28,3 +28,4 @@ tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
+file-rotate = "0.8.0"

@@ -101,7 +101,7 @@ Privacy policy: <https://chat4000.com/privacy>
 | `~/Library/Application Support/chat4000/input_history` | `↑` recall of past messages |
 | `~/Library/Application Support/chat4000/device-identity.json` | Per-device id + display name |
 | `~/Library/Application Support/chat4000/update-nag.json` | "Update available" 30-day throttle |
-| `~/Library/Application Support/chat4000/logs/` | `info.log`, `debug.log`, `exceptions.log` |
+| `~/Library/Application Support/chat4000/logs/chat4000.log` | Single rotating log (10 MB cap, oldest content dropped on rotation) |
 | `~/.config/chat4000/` | Telemetry config (`install-id`, `telemetry-enabled`, `notice-shown`) |
 
 (On Linux, `~/.local/share/chat4000/` for data and `~/.config/chat4000/` for config.)
