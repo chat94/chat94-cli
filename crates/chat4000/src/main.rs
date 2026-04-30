@@ -108,6 +108,11 @@ struct SendArgs {
     /// Seconds to wait for the agent's reply before giving up.
     #[arg(long, default_value_t = 120)]
     timeout: u64,
+
+    /// Print only the agent's reply text — no echo of the sent message,
+    /// no timestamp, no `agent:` prefix. Pipe-friendly.
+    #[arg(long)]
+    raw: bool,
 }
 
 #[derive(Args, Debug)]
@@ -855,7 +860,9 @@ async fn cmd_send(args: SendArgs, paths: &AppPaths) -> Result<()> {
         text: message.clone(),
         ts: sent_ts,
     })?;
-    println!("[{}] you: {}", format_ts_with_ms(sent_ts), message);
+    if !args.raw {
+        println!("[{}] you: {}", format_ts_with_ms(sent_ts), message);
+    }
 
     let group_key = config.group_key()?;
     let group_id = config.group_id()?;
@@ -890,7 +897,11 @@ async fn cmd_send(args: SendArgs, paths: &AppPaths) -> Result<()> {
         text: reply.clone(),
         ts: reply_ts,
     })?;
-    println!("[{}] agent: {}", format_ts_with_ms(reply_ts), reply);
+    if args.raw {
+        println!("{reply}");
+    } else {
+        println!("[{}] agent: {}", format_ts_with_ms(reply_ts), reply);
+    }
 
     Ok(())
 }
@@ -1006,10 +1017,15 @@ ONE-SHOT MESSAGING (no streaming, prints the agent's full reply)
   echo "hello" | chat4000 send   Pipe the message in via stdin instead.
   chat4000 send "msg" --timeout 300
                                  Wait up to 5 minutes for the reply.
+  chat4000 send "msg" --raw      Print only the agent's reply text.
+                                 No `you:` echo, no timestamp, no
+                                 `agent:` prefix. Pipe-friendly.
 
-  Output (both lines on stdout):
+  Default output (both lines on stdout):
     [HH:MM:SS.mmm] you: <message>
     [HH:MM:SS.mmm] agent: <reply>
+
+  With --raw: just <reply> on stdout.
 
 HISTORY
   chat4000 history               Show the last 5 messages with timestamps.
