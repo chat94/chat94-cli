@@ -14,6 +14,7 @@ use serde_json::Value;
 fn hello_builder_produces_expected_fields() {
     let json = RelayOutgoing::hello(
         "abc123",
+        "device-xyz",
         Some("token-1".into()),
         Some("com.neonnode.chat4000app.dev".into()),
         Some("1.2.3".into()),
@@ -24,6 +25,7 @@ fn hello_builder_produces_expected_fields() {
     assert_eq!(object["type"], "hello");
     assert_eq!(object["payload"]["role"], "app");
     assert_eq!(object["payload"]["group_id"], "abc123");
+    assert_eq!(object["payload"]["device_id"], "device-xyz");
     assert_eq!(object["payload"]["device_token"], "token-1");
     assert_eq!(object["payload"]["app_id"], "com.neonnode.chat4000app.dev");
     assert_eq!(object["payload"]["app_version"], "1.2.3");

@@ -284,6 +284,7 @@ where
 pub async fn connect_session(
     relay_url: &str,
     group_id: &str,
+    device_id: &str,
     group_key: Vec<u8>,
     sender: Option<SenderInfo>,
     device_token: Option<String>,
@@ -294,6 +295,7 @@ pub async fn connect_session(
     info!(
         relay_url = %relay_url,
         group_id = %group_id,
+        device_id = %device_id,
         allow_self_signed_tls,
         "connecting relay session"
     );
@@ -303,6 +305,7 @@ pub async fn connect_session(
         HelloPayload {
             role: ClientRole::App,
             group_id: group_id.to_string(),
+            device_id: device_id.to_string(),
             device_token,
             app_id,
             app_version,

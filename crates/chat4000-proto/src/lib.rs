@@ -77,6 +77,7 @@ impl<T> Envelope<T> {
 pub struct HelloPayload {
     pub role: ClientRole,
     pub group_id: String,
+    pub device_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -254,6 +255,7 @@ pub struct RelayOutgoing;
 impl RelayOutgoing {
     pub fn hello(
         group_id: impl Into<String>,
+        device_id: impl Into<String>,
         device_token: Option<String>,
         app_id: Option<String>,
         app_version: Option<String>,
@@ -263,6 +265,7 @@ impl RelayOutgoing {
             HelloPayload {
                 role: ClientRole::App,
                 group_id: group_id.into(),
+                device_id: device_id.into(),
                 device_token,
                 app_id,
                 app_version,

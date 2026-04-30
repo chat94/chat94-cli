@@ -734,9 +734,11 @@ async fn cmd_status(paths: &AppPaths) -> Result<()> {
     };
 
     let group_id = config.group_id()?;
+    let identity = paths.load_or_create_device_identity()?;
     let session = connect_session(
         DEFAULT_RELAY_URL,
         &group_id,
+        &identity.sender.device_id,
         config.group_key()?,
         None,
         None,
@@ -862,6 +864,7 @@ async fn cmd_send(args: SendArgs, paths: &AppPaths) -> Result<()> {
     let mut session = connect_session(
         DEFAULT_RELAY_URL,
         &group_id,
+        &identity.sender.device_id,
         group_key,
         Some(identity.sender()),
         None,
@@ -1440,6 +1443,7 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
     let mut session = connect_with_retries(
         DEFAULT_RELAY_URL,
         &group_id,
+        &device_identity.sender.device_id,
         group_key.clone(),
         Some(device_identity.sender()),
     )
@@ -1695,6 +1699,7 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
                         session = connect_with_retries(
                             DEFAULT_RELAY_URL,
                             &group_id,
+                            &device_identity.sender.device_id,
                             group_key.clone(),
                             Some(device_identity.sender()),
                         )
@@ -1799,6 +1804,7 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
 async fn connect_with_retries(
     relay: &str,
     group_id: &str,
+    device_id: &str,
     group_key: Vec<u8>,
     sender: Option<SenderInfo>,
 ) -> Result<chat4000_relay::RelaySession> {
@@ -1807,6 +1813,7 @@ async fn connect_with_retries(
         match connect_session(
             relay,
             group_id,
+            device_id,
             group_key.clone(),
             sender.clone(),
             None,
