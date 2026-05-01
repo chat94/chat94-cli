@@ -882,14 +882,19 @@ async fn cmd_send(args: SendArgs, paths: &AppPaths) -> Result<()> {
     .await
     .context("failed to connect to relay")?;
 
+    let stale_streams = drain_until_idle(&mut session, &identity).await?;
+
     session
         .send_text(&message)
         .context("failed to send message")?;
 
     let timeout = Duration::from_secs(args.timeout);
-    let reply = tokio::time::timeout(timeout, wait_for_agent_reply(&mut session, &identity))
-        .await
-        .map_err(|_| anyhow!("timed out after {}s waiting for agent reply", args.timeout))??;
+    let reply = tokio::time::timeout(
+        timeout,
+        wait_for_agent_reply(&mut session, &identity, &stale_streams),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out after {}s waiting for agent reply", args.timeout))??;
 
     let reply_ts = unix_ms();
     paths.append_history(&HistoryEntry {
@@ -906,9 +911,99 @@ async fn cmd_send(args: SendArgs, paths: &AppPaths) -> Result<()> {
     Ok(())
 }
 
+async fn drain_until_idle(
+    session: &mut chat4000_relay::RelaySession,
+    identity: &AppDeviceIdentity,
+) -> Result<HashSet<String>> {
+    const QUIET_THRESHOLD: Duration = Duration::from_millis(500);
+    const DRAIN_HARD_CAP: Duration = Duration::from_secs(30);
+    const IDLE_WAIT_CAP: Duration = Duration::from_secs(60);
+
+    let mut stale: HashSet<String> = HashSet::new();
+    let mut last_status: Option<String> = None;
+
+    let drain_started = std::time::Instant::now();
+    loop {
+        if drain_started.elapsed() > DRAIN_HARD_CAP {
+            warn!("drain phase exceeded 30s — proceeding anyway");
+            break;
+        }
+        match tokio::time::timeout(QUIET_THRESHOLD, session.next_event()).await {
+            Ok(Some(SessionEvent::InnerMessage(msg))) => {
+                if identity.is_local_sender(msg.from.as_ref()) {
+                    continue;
+                }
+                match msg.t {
+                    chat4000_proto::InnerMessageType::Status => {
+                        if let Some(s) = msg.body.get("status").and_then(|v| v.as_str()) {
+                            last_status = Some(s.to_string());
+                        }
+                    }
+                    chat4000_proto::InnerMessageType::Text
+                    | chat4000_proto::InnerMessageType::TextDelta
+                    | chat4000_proto::InnerMessageType::TextEnd => {
+                        stale.insert(msg.id.to_string());
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Some(SessionEvent::Connected)) => {}
+            Ok(Some(SessionEvent::Disconnected(reason))) => {
+                bail!("relay session disconnected during drain: {reason}");
+            }
+            Ok(None) => bail!("relay session closed during drain"),
+            Err(_) => break,
+        }
+    }
+
+    if matches!(last_status.as_deref(), Some("thinking") | Some("typing")) {
+        info!(?last_status, "agent busy after drain; waiting for idle before sending");
+        let idle_started = std::time::Instant::now();
+        loop {
+            if idle_started.elapsed() > IDLE_WAIT_CAP {
+                warn!("agent never went idle within 60s — sending anyway");
+                break;
+            }
+            let remaining = IDLE_WAIT_CAP.saturating_sub(idle_started.elapsed());
+            match tokio::time::timeout(remaining, session.next_event()).await {
+                Ok(Some(SessionEvent::InnerMessage(msg))) => {
+                    if identity.is_local_sender(msg.from.as_ref()) {
+                        continue;
+                    }
+                    match msg.t {
+                        chat4000_proto::InnerMessageType::Status => {
+                            if let Some(s) = msg.body.get("status").and_then(|v| v.as_str()) {
+                                if s == "idle" {
+                                    info!("agent idle; proceeding to send");
+                                    break;
+                                }
+                            }
+                        }
+                        chat4000_proto::InnerMessageType::Text
+                        | chat4000_proto::InnerMessageType::TextDelta
+                        | chat4000_proto::InnerMessageType::TextEnd => {
+                            stale.insert(msg.id.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Some(SessionEvent::Connected)) => {}
+                Ok(Some(SessionEvent::Disconnected(reason))) => {
+                    bail!("relay session disconnected while waiting for idle: {reason}");
+                }
+                Ok(None) => bail!("relay session closed while waiting for idle"),
+                Err(_) => break,
+            }
+        }
+    }
+
+    Ok(stale)
+}
+
 async fn wait_for_agent_reply(
     session: &mut chat4000_relay::RelaySession,
     identity: &AppDeviceIdentity,
+    stale_streams: &HashSet<String>,
 ) -> Result<String> {
     let mut buffers: HashMap<String, String> = HashMap::new();
     while let Some(event) = session.next_event().await {
@@ -921,6 +1016,10 @@ async fn wait_for_agent_reply(
                 if identity.is_local_sender(message.from.as_ref()) {
                     continue;
                 }
+                let id = message.id.to_string();
+                if stale_streams.contains(&id) {
+                    continue;
+                }
                 match message.t {
                     chat4000_proto::InnerMessageType::Text => {
                         if let Some(text) = message.body.get("text").and_then(|v| v.as_str()) {
@@ -928,7 +1027,6 @@ async fn wait_for_agent_reply(
                         }
                     }
                     chat4000_proto::InnerMessageType::TextDelta => {
-                        let id = message.id.to_string();
                         let delta = message
                             .body
                             .get("delta")
@@ -937,7 +1035,6 @@ async fn wait_for_agent_reply(
                         buffers.entry(id).or_default().push_str(delta);
                     }
                     chat4000_proto::InnerMessageType::TextEnd => {
-                        let id = message.id.to_string();
                         let final_text = message
                             .body
                             .get("text")
