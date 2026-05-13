@@ -18,6 +18,8 @@ fn hello_builder_produces_expected_fields() {
         Some("token-1".into()),
         Some("com.neonnode.chat4000app.dev".into()),
         Some("1.2.3".into()),
+        Some("dev".into()),
+        Some(4123),
     )
     .unwrap();
     let object: Value = serde_json::from_str(&json).unwrap();
@@ -29,6 +31,66 @@ fn hello_builder_produces_expected_fields() {
     assert_eq!(object["payload"]["device_token"], "token-1");
     assert_eq!(object["payload"]["app_id"], "com.neonnode.chat4000app.dev");
     assert_eq!(object["payload"]["app_version"], "1.2.3");
+    assert_eq!(object["payload"]["release_channel"], "dev");
+    assert_eq!(object["payload"]["last_acked_seq"], 4123);
+}
+
+#[test]
+fn hello_omits_last_acked_seq_when_unset() {
+    let json = RelayOutgoing::hello("g", "d", None, None, None, None, None).unwrap();
+    let value: Value = serde_json::from_str(&json).unwrap();
+    assert!(value["payload"].get("last_acked_seq").is_none());
+    assert!(value["payload"].get("release_channel").is_none());
+}
+
+#[test]
+fn recv_ack_builder_round_trip() {
+    let json = RelayOutgoing::recv_ack(4180, vec![[4182, 4191]]).unwrap();
+    let value: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["type"], "recv_ack");
+    assert_eq!(value["payload"]["up_to_seq"], 4180);
+    assert_eq!(value["payload"]["ranges"][0][0], 4182);
+    assert_eq!(value["payload"]["ranges"][0][1], 4191);
+}
+
+#[test]
+fn relay_recv_ack_parses() {
+    let json = r#"{"version":1,"type":"relay_recv_ack","payload":{"msg_id":"m-1","queued_for":["plugin"]}}"#;
+    let parsed = IncomingMessage::parse(json).unwrap();
+    let IncomingMessage::RelayRecvAck(payload) = parsed else {
+        panic!("expected RelayRecvAck");
+    };
+    assert_eq!(payload.msg_id, "m-1");
+    assert_eq!(payload.queued_for, vec!["plugin".to_string()]);
+}
+
+#[test]
+fn msg_with_seq_parses() {
+    let json = r#"{"version":1,"type":"msg","payload":{"nonce":"n","ciphertext":"c","msg_id":"m","seq":4124,"notify_if_offline":true}}"#;
+    let parsed = IncomingMessage::parse(json).unwrap();
+    let IncomingMessage::Msg(payload) = parsed else {
+        panic!("expected Msg");
+    };
+    assert_eq!(payload.seq, Some(4124));
+    assert_eq!(payload.notify_if_offline, Some(true));
+}
+
+#[test]
+fn inner_ack_round_trip() {
+    let sender = SenderInfo {
+        role: SenderRole::App,
+        device_id: "d-1".into(),
+        device_name: "CLI".into(),
+        app_version: Some("1.0.1".into()),
+        bundle_id: Some("com.neonnode.chat4000cli".into()),
+    };
+    let inner = InnerMessage::ack_received("msg-uuid-1", sender);
+    let serialized = serde_json::to_string(&inner).unwrap();
+    let round_trip: InnerMessage = serde_json::from_str(&serialized).unwrap();
+    let ack = round_trip.as_ack().unwrap();
+    assert_eq!(ack.refs, "msg-uuid-1");
+    assert_eq!(ack.stage, "received");
+    assert_eq!(round_trip.t, InnerMessageType::Ack);
 }
 
 #[test]
@@ -90,8 +152,7 @@ fn hello_ok_with_all_null_policy_fields_parses() {
 
 #[test]
 fn hello_ok_empty_payload_still_parses() {
-    let parsed =
-        IncomingMessage::parse(r#"{"version":1,"type":"hello_ok","payload":{}}"#).unwrap();
+    let parsed = IncomingMessage::parse(r#"{"version":1,"type":"hello_ok","payload":{}}"#).unwrap();
     let IncomingMessage::HelloOk(payload) = parsed else {
         panic!("expected HelloOk");
     };

@@ -9,7 +9,8 @@ use uuid::Uuid;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_MESSAGE_SIZE: usize = 65_536;
-pub const HEARTBEAT_INTERVAL_SECS: u64 = 30;
+pub const HEARTBEAT_INTERVAL_SECS: u64 = 25;
+pub const HEARTBEAT_DEAD_AFTER_SECS: u64 = 60;
 pub const DEFAULT_RELAY_URL: &str = "wss://relay.chat4000.com/ws";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +54,8 @@ pub enum MessageType {
     Msg,
     Ping,
     Pong,
+    RecvAck,
+    RelayRecvAck,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -84,6 +87,10 @@ pub struct HelloPayload {
     pub app_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_acked_seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -102,6 +109,8 @@ pub struct HelloOkPayload {
     pub current_terms_version: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_policy: Option<VersionPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_version_policy: Option<VersionPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +142,24 @@ pub struct MsgPayload {
     pub nonce: String,
     pub ciphertext: String,
     pub msg_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_if_offline: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecvAckPayload {
+    pub up_to_seq: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ranges: Vec<[u64; 2]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayRecvAckPayload {
+    pub msg_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued_for: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +232,24 @@ pub enum InnerMessageType {
     TextDelta,
     TextEnd,
     Status,
+    Ack,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AckStage {
+    Received,
+    Processing,
+    Displayed,
+}
+
+impl AckStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Received => "received",
+            Self::Processing => "processing",
+            Self::Displayed => "displayed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,6 +282,7 @@ pub enum IncomingMessage {
     HelloOk(HelloOkPayload),
     HelloError(ErrorPayload),
     Msg(MsgPayload),
+    RelayRecvAck(RelayRecvAckPayload),
     Pong,
 }
 
@@ -259,6 +305,8 @@ impl RelayOutgoing {
         device_token: Option<String>,
         app_id: Option<String>,
         app_version: Option<String>,
+        release_channel: Option<String>,
+        last_acked_seq: Option<u64>,
     ) -> serde_json::Result<String> {
         serde_json::to_string(&Envelope::new(
             MessageType::Hello,
@@ -269,6 +317,8 @@ impl RelayOutgoing {
                 device_token,
                 app_id,
                 app_version,
+                release_channel,
+                last_acked_seq,
             },
         ))
     }
@@ -364,6 +414,7 @@ impl RelayOutgoing {
         nonce: impl Into<String>,
         ciphertext: impl Into<String>,
         msg_id: impl Into<String>,
+        notify_if_offline: Option<bool>,
     ) -> serde_json::Result<String> {
         serde_json::to_string(&Envelope::new(
             MessageType::Msg,
@@ -371,7 +422,16 @@ impl RelayOutgoing {
                 nonce: nonce.into(),
                 ciphertext: ciphertext.into(),
                 msg_id: msg_id.into(),
+                seq: None,
+                notify_if_offline,
             },
+        ))
+    }
+
+    pub fn recv_ack(up_to_seq: u64, ranges: Vec<[u64; 2]>) -> serde_json::Result<String> {
+        serde_json::to_string(&Envelope::new(
+            MessageType::RecvAck,
+            RecvAckPayload { up_to_seq, ranges },
         ))
     }
 
@@ -421,6 +481,10 @@ impl IncomingMessage {
                 let env: Envelope<MsgPayload> = serde_json::from_str(input)?;
                 Ok(Self::Msg(env.payload))
             }
+            MessageType::RelayRecvAck => {
+                let env: Envelope<RelayRecvAckPayload> = serde_json::from_str(input)?;
+                Ok(Self::RelayRecvAck(env.payload))
+            }
             MessageType::Pong => Ok(Self::Pong),
             MessageType::PairData => {
                 let env: Envelope<PairDataPayload> = serde_json::from_str(input)?;
@@ -449,7 +513,8 @@ impl IncomingMessage {
             | MessageType::Challenge
             | MessageType::Register
             | MessageType::Hello
-            | MessageType::Ping => Err(ProtocolError::UnsupportedMessage),
+            | MessageType::Ping
+            | MessageType::RecvAck => Err(ProtocolError::UnsupportedMessage),
         }
     }
 }
@@ -499,6 +564,30 @@ impl InnerMessage {
         )
     }
 
+    pub fn ack_received(refs: impl Into<String>, sender: SenderInfo) -> Self {
+        Self::new(
+            InnerMessageType::Ack,
+            Some(sender),
+            serde_json::json!({
+                "refs": refs.into(),
+                "stage": AckStage::Received.as_str(),
+            }),
+        )
+    }
+
+    pub fn as_ack(&self) -> Option<AckRef<'_>> {
+        if !matches!(self.t, InnerMessageType::Ack) {
+            return None;
+        }
+        let refs = self.body.get("refs").and_then(|v| v.as_str())?;
+        let stage = self
+            .body
+            .get("stage")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        Some(AckRef { refs, stage })
+    }
+
     pub fn new(t: InnerMessageType, from: Option<SenderInfo>, body: Value) -> Self {
         Self {
             t,
@@ -508,6 +597,12 @@ impl InnerMessage {
             ts: unix_ms(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AckRef<'a> {
+    pub refs: &'a str,
+    pub stage: &'a str,
 }
 
 fn unix_ms() -> i64 {

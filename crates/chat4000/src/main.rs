@@ -14,16 +14,18 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use chrono::{Local, TimeZone};
 use chat4000_crypto::{
     GROUP_KEY_LEN, PAIRING_CODE_ALPHABET, derive_group_id, derive_pairing_room_id,
     generate_group_key, generate_pairing_code, normalize_pairing_code,
 };
 use chat4000_proto::{DEFAULT_RELAY_URL, SenderInfo, SenderRole, VersionPolicy};
 use chat4000_relay::{
-    PairHostOptions, PairHostStatus, PairJoinOptions, SessionEvent, connect_session,
-    host_pairing_session, join_pairing_session,
+    PairHostOptions, PairHostStatus, PairJoinOptions, host_pairing_session, join_pairing_session,
 };
+use chrono::{Local, TimeZone};
+
+mod store;
+mod transport;
 use clap::{Args, Parser, Subcommand};
 use crossterm::{
     cursor,
@@ -40,6 +42,7 @@ use crossterm::{
 use qrcode::{QrCode, render::unicode};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use store::{MessageStore, OutboundState};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -50,6 +53,9 @@ use uuid::Uuid;
 static EXCEPTION_LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static LOG_GUARDS: OnceLock<Vec<WorkerGuard>> = OnceLock::new();
 static TELEMETRY_ENABLED: OnceLock<bool> = OnceLock::new();
+static DEBUG_ACKS: OnceLock<bool> = OnceLock::new();
+const ALLOW_OUTDATED_PLUGIN_ENV: &str = "CHAT4000_ALLOW_OUTDATED_PLUGIN";
+const RELEASE_CHANNEL: &str = "release";
 const DEFAULT_APP_ID: &str = "com.neonnode.chat4000cli";
 const CLI_BUNDLE_ID: &str = "com.neonnode.chat4000cli";
 const MIN_PLUGIN_VERSION: &str = "0.1.0";
@@ -75,6 +81,10 @@ struct Cli {
 
     #[arg(long, global = true)]
     no_telemetry: bool,
+
+    /// Print every recv_ack / relay_recv_ack / inner ack to stderr for verification.
+    #[arg(long, global = true)]
+    debug_acks: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -241,6 +251,7 @@ async fn main() {
     init_tracing(&cli, &paths);
     let telemetry = TelemetryState::resolve(&cli);
     let _ = TELEMETRY_ENABLED.set(telemetry.enabled);
+    let _ = DEBUG_ACKS.set(cli.debug_acks);
     if matches!(cli.command, Some(Command::Telemetry(_))) {
         install_panic_hook();
         let result = match cli.command {
@@ -594,7 +605,9 @@ fn init_tracing(cli: &Cli, paths: &AppPaths) {
     });
 
     let log_layer = fmt::layer().with_ansi(false).with_writer(writer);
-    let subscriber = tracing_subscriber::registry().with(env_filter).with(log_layer);
+    let subscriber = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(log_layer);
 
     if cli.stdout_logs {
         subscriber.with(fmt::layer()).init();
@@ -738,33 +751,36 @@ async fn cmd_status(paths: &AppPaths) -> Result<()> {
         return Ok(());
     };
 
+    use crate::transport::MessageTransport;
+    use crate::transport::relay::{RelayMessageTransport, TransportConfig};
+    use std::sync::Arc;
+
     let group_id = config.group_id()?;
     let identity = paths.load_or_create_device_identity()?;
-    let session = connect_session(
-        DEFAULT_RELAY_URL,
-        &group_id,
-        &identity.sender.device_id,
-        config.group_key()?,
-        None,
-        None,
-        Some(DEFAULT_APP_ID.to_string()),
-        Some(env!("CARGO_PKG_VERSION").to_string()),
-        false,
-    )
-    .await?;
+    let store = Arc::new(paths.open_store().context("failed to open message store")?);
+    let transport_config = TransportConfig {
+        relay_url: DEFAULT_RELAY_URL.to_string(),
+        group_id: group_id.clone(),
+        group_key: config.group_key()?,
+        device_id: identity.sender.device_id.clone(),
+        sender: identity.sender(),
+        app_id: Some(DEFAULT_APP_ID.to_string()),
+        app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        release_channel: Some(RELEASE_CHANNEL.to_string()),
+        allow_self_signed_tls: false,
+        debug_acks: debug_acks_enabled(),
+    };
+    let (transport, _events) = RelayMessageTransport::start(transport_config, Arc::clone(&store))
+        .await
+        .context("failed to connect to relay")?;
     println!("Status: paired");
     println!("Group ID: {group_id}");
-    println!(
-        "Relay handshake: {}",
-        if session.latency_ok() {
-            "ok"
-        } else {
-            "connected, waiting on heartbeat"
-        }
-    );
+    println!("Relay handshake: ok");
     println!("Config: {}", paths.config_file.display());
     println!("History: {}", paths.history_file.display());
-    if let Some(policy) = session.version_policy() {
+    let version_policy = transport.version_policy();
+    transport.disconnect();
+    if let Some(policy) = version_policy.as_ref() {
         match evaluate_version_policy(env!("CARGO_PKG_VERSION"), policy) {
             VersionPolicyAction::HardBlock { min_version } => {
                 println!(
@@ -832,6 +848,11 @@ fn open_support_url() -> Result<()> {
 }
 
 async fn cmd_send(args: SendArgs, paths: &AppPaths) -> Result<()> {
+    use std::sync::Arc;
+
+    use crate::transport::relay::{RelayMessageTransport, TransportConfig};
+    use crate::transport::{MessageTransport, OutboundMessage};
+
     info!(timeout = args.timeout, "running send command");
 
     let config = paths
@@ -860,104 +881,174 @@ async fn cmd_send(args: SendArgs, paths: &AppPaths) -> Result<()> {
         text: message.clone(),
         ts: sent_ts,
     })?;
-    if !args.raw {
-        println!("[{}] you: {}", format_ts_with_ms(sent_ts), message);
-    }
 
     let group_key = config.group_key()?;
     let group_id = config.group_id()?;
     let identity = paths.load_or_create_device_identity()?;
+    let store = Arc::new(paths.open_store().context("failed to open message store")?);
 
-    let mut session = connect_session(
-        DEFAULT_RELAY_URL,
-        &group_id,
-        &identity.sender.device_id,
+    let transport_config = TransportConfig {
+        relay_url: DEFAULT_RELAY_URL.to_string(),
+        group_id: group_id.clone(),
         group_key,
-        Some(identity.sender()),
-        None,
-        Some(DEFAULT_APP_ID.to_string()),
-        Some(env!("CARGO_PKG_VERSION").to_string()),
-        false,
+        device_id: identity.sender.device_id.clone(),
+        sender: identity.sender(),
+        app_id: Some(DEFAULT_APP_ID.to_string()),
+        app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        release_channel: Some(RELEASE_CHANNEL.to_string()),
+        allow_self_signed_tls: false,
+        debug_acks: debug_acks_enabled(),
+    };
+    let (transport, mut events) =
+        RelayMessageTransport::start(transport_config, Arc::clone(&store))
+            .await
+            .context("failed to connect to relay")?;
+    let plugin_policy = transport.plugin_version_policy();
+
+    let mut outbound = OutboundTracker::default();
+    let mut plugin_seen = false;
+
+    // Drain phase: consume events until the agent appears idle.
+    let stale_streams = drain_until_idle_via_transport(
+        &mut events,
+        &transport,
+        &identity,
+        plugin_policy.as_ref(),
+        &mut plugin_seen,
     )
-    .await
-    .context("failed to connect to relay")?;
+    .await?;
 
-    let stale_streams = drain_until_idle(&mut session, &identity).await?;
-
-    session
-        .send_text(&message)
-        .context("failed to send message")?;
+    let outbound_msg_id = transport.send(OutboundMessage::Text(message.clone()));
+    outbound.track(outbound_msg_id.clone());
+    store.record_outbound(&group_id, &outbound_msg_id, sent_ts)?;
 
     let timeout = Duration::from_secs(args.timeout);
-    let reply = tokio::time::timeout(
+    let reply_result = tokio::time::timeout(
         timeout,
-        wait_for_agent_reply(&mut session, &identity, &stale_streams),
+        wait_for_agent_reply_via_transport(
+            &mut events,
+            &transport,
+            &identity,
+            &stale_streams,
+            &group_id,
+            store.as_ref(),
+            &mut outbound,
+            plugin_policy.as_ref(),
+            &mut plugin_seen,
+        ),
     )
-    .await
-    .map_err(|_| anyhow!("timed out after {}s waiting for agent reply", args.timeout))??;
+    .await;
 
-    let reply_ts = unix_ms();
-    paths.append_history(&HistoryEntry {
-        role: HistoryRole::Agent,
-        text: reply.clone(),
-        ts: reply_ts,
-    })?;
-    if args.raw {
-        println!("{reply}");
-    } else {
-        println!("[{}] agent: {}", format_ts_with_ms(reply_ts), reply);
+    transport.disconnect();
+
+    match reply_result {
+        Ok(Ok(reply)) => {
+            let reply_ts = unix_ms();
+            paths.append_history(&HistoryEntry {
+                role: HistoryRole::Agent,
+                text: reply.clone(),
+                ts: reply_ts,
+            })?;
+            if args.raw {
+                println!("{reply}");
+            } else {
+                let tick = render_tick(outbound.state_of(&outbound_msg_id));
+                println!("[{}] you: {} {}", format_ts_with_ms(sent_ts), message, tick);
+                println!("[{}] agent: {}", format_ts_with_ms(reply_ts), reply);
+            }
+            Ok(())
+        }
+        Ok(Err(err)) => {
+            outbound.mark_failed(&outbound_msg_id, &group_id, store.as_ref());
+            if !args.raw {
+                eprintln!(
+                    "[{}] you: {} {}",
+                    format_ts_with_ms(sent_ts),
+                    message,
+                    render_tick(OutboundState::Failed),
+                );
+            }
+            Err(err)
+        }
+        Err(_) => {
+            outbound.mark_failed(&outbound_msg_id, &group_id, store.as_ref());
+            if !args.raw {
+                eprintln!(
+                    "[{}] you: {} {}",
+                    format_ts_with_ms(sent_ts),
+                    message,
+                    render_tick(OutboundState::Failed),
+                );
+            }
+            bail!("timed out after {}s waiting for agent reply", args.timeout)
+        }
     }
-
-    Ok(())
 }
 
-async fn drain_until_idle(
-    session: &mut chat4000_relay::RelaySession,
+/// Drain incoming events until the relay-and-agent are quiet for 500 ms; if a
+/// `thinking`/`typing` status was last seen, wait up to 60 s for `idle`.
+async fn drain_until_idle_via_transport(
+    events: &mut transport::TransportEvents,
+    transport: &dyn transport::MessageTransport,
     identity: &AppDeviceIdentity,
+    plugin_policy: Option<&VersionPolicy>,
+    plugin_seen: &mut bool,
 ) -> Result<HashSet<String>> {
+    use crate::transport::{ConnectionState, TransportEvent};
+    use chat4000_proto::InnerMessageType;
+
     const QUIET_THRESHOLD: Duration = Duration::from_millis(500);
     const DRAIN_HARD_CAP: Duration = Duration::from_secs(30);
     const IDLE_WAIT_CAP: Duration = Duration::from_secs(60);
 
     let mut stale: HashSet<String> = HashSet::new();
     let mut last_status: Option<String> = None;
-
     let drain_started = std::time::Instant::now();
+
     loop {
         if drain_started.elapsed() > DRAIN_HARD_CAP {
             warn!("drain phase exceeded 30s — proceeding anyway");
             break;
         }
-        match tokio::time::timeout(QUIET_THRESHOLD, session.next_event()).await {
-            Ok(Some(SessionEvent::InnerMessage(msg))) => {
+        match tokio::time::timeout(QUIET_THRESHOLD, events.recv()).await {
+            Ok(Some(TransportEvent::Receive(msg))) => {
+                handle_received_for_consumer(&msg, plugin_policy, plugin_seen);
                 if identity.is_local_sender(msg.from.as_ref()) {
                     continue;
                 }
                 match msg.t {
-                    chat4000_proto::InnerMessageType::Status => {
+                    InnerMessageType::Status => {
                         if let Some(s) = msg.body.get("status").and_then(|v| v.as_str()) {
                             last_status = Some(s.to_string());
                         }
                     }
-                    chat4000_proto::InnerMessageType::Text
-                    | chat4000_proto::InnerMessageType::TextDelta
-                    | chat4000_proto::InnerMessageType::TextEnd => {
+                    InnerMessageType::Text => {
+                        // Plain (non-streamed) text: track by inner.id.
                         stale.insert(msg.id.to_string());
+                    }
+                    InnerMessageType::TextDelta | InnerMessageType::TextEnd => {
+                        // Streamed reply: stale-tracking lives on the stream
+                        // correlator, not the per-frame inner.id.
+                        stale.insert(stream_correlator(&msg));
                     }
                     _ => {}
                 }
             }
-            Ok(Some(SessionEvent::Connected)) => {}
-            Ok(Some(SessionEvent::Disconnected(reason))) => {
-                bail!("relay session disconnected during drain: {reason}");
+            Ok(Some(TransportEvent::Status(_))) => {}
+            Ok(Some(TransportEvent::Connection(ConnectionState::Failed(reason)))) => {
+                bail!("relay connection failed during drain: {reason}");
             }
-            Ok(None) => bail!("relay session closed during drain"),
+            Ok(Some(TransportEvent::Connection(_))) => {}
+            Ok(None) => bail!("transport closed during drain"),
             Err(_) => break,
         }
     }
 
     if matches!(last_status.as_deref(), Some("thinking") | Some("typing")) {
-        info!(?last_status, "agent busy after drain; waiting for idle before sending");
+        info!(
+            ?last_status,
+            "agent busy after drain; waiting for idle before sending"
+        );
         let idle_started = std::time::Instant::now();
         loop {
             if idle_started.elapsed() > IDLE_WAIT_CAP {
@@ -965,13 +1056,14 @@ async fn drain_until_idle(
                 break;
             }
             let remaining = IDLE_WAIT_CAP.saturating_sub(idle_started.elapsed());
-            match tokio::time::timeout(remaining, session.next_event()).await {
-                Ok(Some(SessionEvent::InnerMessage(msg))) => {
+            match tokio::time::timeout(remaining, events.recv()).await {
+                Ok(Some(TransportEvent::Receive(msg))) => {
+                    handle_received_for_consumer(&msg, plugin_policy, plugin_seen);
                     if identity.is_local_sender(msg.from.as_ref()) {
                         continue;
                     }
                     match msg.t {
-                        chat4000_proto::InnerMessageType::Status => {
+                        InnerMessageType::Status => {
                             if let Some(s) = msg.body.get("status").and_then(|v| v.as_str()) {
                                 if s == "idle" {
                                     info!("agent idle; proceeding to send");
@@ -979,19 +1071,21 @@ async fn drain_until_idle(
                                 }
                             }
                         }
-                        chat4000_proto::InnerMessageType::Text
-                        | chat4000_proto::InnerMessageType::TextDelta
-                        | chat4000_proto::InnerMessageType::TextEnd => {
+                        InnerMessageType::Text => {
                             stale.insert(msg.id.to_string());
+                        }
+                        InnerMessageType::TextDelta | InnerMessageType::TextEnd => {
+                            stale.insert(stream_correlator(&msg));
                         }
                         _ => {}
                     }
                 }
-                Ok(Some(SessionEvent::Connected)) => {}
-                Ok(Some(SessionEvent::Disconnected(reason))) => {
-                    bail!("relay session disconnected while waiting for idle: {reason}");
+                Ok(Some(TransportEvent::Status(_))) => {}
+                Ok(Some(TransportEvent::Connection(ConnectionState::Failed(reason)))) => {
+                    bail!("relay connection failed while waiting for idle: {reason}");
                 }
-                Ok(None) => bail!("relay session closed while waiting for idle"),
+                Ok(Some(TransportEvent::Connection(_))) => {}
+                Ok(None) => bail!("transport closed while waiting for idle"),
                 Err(_) => break,
             }
         }
@@ -1000,24 +1094,89 @@ async fn drain_until_idle(
     Ok(stale)
 }
 
-async fn wait_for_agent_reply(
-    session: &mut chat4000_relay::RelaySession,
+/// Per §6.6.5 + §6.6.11: once an inner message lands, the consumer (not the
+/// transport) is responsible for emitting the inner-`ack` Flow B response and
+/// for evaluating plugin-version policy.
+// §6.6.5: in v1 only the plugin emits inner ack frames. The CLI is an app,
+// so it does not emit any. Kept around for the plugin-version-policy nag.
+fn handle_received_for_consumer(
+    msg: &chat4000_proto::InnerMessage,
+    plugin_policy: Option<&VersionPolicy>,
+    plugin_seen: &mut bool,
+) {
+    use chat4000_proto::SenderRole;
+
+    if !*plugin_seen && msg.from.as_ref().map(|f| f.role) == Some(SenderRole::Plugin) {
+        *plugin_seen = true;
+        if let Some(policy) = plugin_policy {
+            let plugin_v = msg.from.as_ref().and_then(|f| f.app_version.as_deref());
+            match evaluate_plugin_version_policy(plugin_v, policy) {
+                PluginPolicyVerdict::HardBlock => {
+                    if !allow_outdated_plugin() {
+                        eprintln!(
+                            "[plugin update required — set {ALLOW_OUTDATED_PLUGIN_ENV}=1 to bypass]"
+                        );
+                    } else {
+                        eprintln!("[plugin update required, bypassed]");
+                    }
+                }
+                PluginPolicyVerdict::SoftNag => {
+                    eprintln!("[plugin update available]");
+                }
+                PluginPolicyVerdict::Ok => {}
+            }
+        }
+    }
+}
+
+async fn wait_for_agent_reply_via_transport(
+    events: &mut transport::TransportEvents,
+    transport: &dyn transport::MessageTransport,
     identity: &AppDeviceIdentity,
     stale_streams: &HashSet<String>,
+    group_id: &str,
+    store: &MessageStore,
+    outbound: &mut OutboundTracker,
+    plugin_policy: Option<&VersionPolicy>,
+    plugin_seen: &mut bool,
 ) -> Result<String> {
+    use crate::transport::{ConnectionState, TransportEvent, TransportStatus};
+
     let mut buffers: HashMap<String, String> = HashMap::new();
-    while let Some(event) = session.next_event().await {
+    while let Some(event) = events.recv().await {
         match event {
-            SessionEvent::Connected => {}
-            SessionEvent::Disconnected(reason) => {
-                bail!("relay session disconnected: {reason}");
+            TransportEvent::Connection(ConnectionState::Failed(reason)) => {
+                bail!("relay connection failed: {reason}");
             }
-            SessionEvent::InnerMessage(message) => {
+            TransportEvent::Connection(_) => {}
+            TransportEvent::Status(update) => match update.status {
+                TransportStatus::Sent => {
+                    outbound.mark_sent(&update.msg_id, group_id, store);
+                }
+                TransportStatus::Failed => {
+                    outbound.mark_failed(&update.msg_id, group_id, store);
+                }
+            },
+            TransportEvent::Receive(message) => {
+                handle_received_for_consumer(&message, plugin_policy, plugin_seen);
+                // Inner-ack Flow B inbound: drives `delivered` tick on outbound rows.
+                if let Some(ack) = message.as_ack() {
+                    if ack.stage == "received" {
+                        outbound.mark_delivered(ack.refs, group_id, store);
+                    }
+                    continue;
+                }
                 if identity.is_local_sender(message.from.as_ref()) {
                     continue;
                 }
-                let id = message.id.to_string();
-                if stale_streams.contains(&id) {
+                // For Text the dedup/stale-tracking key is inner.id (per-message);
+                // for streaming frames it is body.stream_id (per-stream correlator).
+                let key = match message.t {
+                    chat4000_proto::InnerMessageType::TextDelta
+                    | chat4000_proto::InnerMessageType::TextEnd => stream_correlator(&message),
+                    _ => message.id.to_string(),
+                };
+                if stale_streams.contains(&key) {
                     continue;
                 }
                 match message.t {
@@ -1032,7 +1191,7 @@ async fn wait_for_agent_reply(
                             .get("delta")
                             .and_then(|v| v.as_str())
                             .unwrap_or_default();
-                        buffers.entry(id).or_default().push_str(delta);
+                        buffers.entry(key).or_default().push_str(delta);
                     }
                     chat4000_proto::InnerMessageType::TextEnd => {
                         let final_text = message
@@ -1046,13 +1205,13 @@ async fn wait_for_agent_reply(
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
                         if reset {
-                            buffers.remove(&id);
+                            buffers.remove(&key);
                             continue;
                         }
                         let assembled = if !final_text.is_empty() {
                             final_text.to_string()
                         } else {
-                            buffers.remove(&id).unwrap_or_default()
+                            buffers.remove(&key).unwrap_or_default()
                         };
                         return Ok(assembled);
                     }
@@ -1061,7 +1220,136 @@ async fn wait_for_agent_reply(
             }
         }
     }
-    bail!("relay session closed before any agent reply arrived");
+    bail!("transport closed before any agent reply arrived");
+}
+
+#[derive(Debug, Default)]
+struct OutboundTracker {
+    states: HashMap<String, OutboundState>,
+}
+
+impl OutboundTracker {
+    fn track(&mut self, msg_id: String) {
+        self.states.insert(msg_id, OutboundState::Sending);
+    }
+
+    fn mark_sent(&mut self, msg_id: &str, group_id: &str, store: &MessageStore) {
+        if let Some(state) = self.states.get_mut(msg_id) {
+            if *state == OutboundState::Sending {
+                *state = OutboundState::Sent;
+                let _ = store.set_outbound_state(group_id, msg_id, OutboundState::Sent);
+            }
+        }
+    }
+
+    fn mark_delivered(&mut self, msg_id: &str, group_id: &str, store: &MessageStore) {
+        if let Some(state) = self.states.get_mut(msg_id) {
+            if *state != OutboundState::Delivered {
+                *state = OutboundState::Delivered;
+                let _ = store.set_outbound_state(group_id, msg_id, OutboundState::Delivered);
+            }
+        }
+    }
+
+    fn mark_failed(&mut self, msg_id: &str, group_id: &str, store: &MessageStore) {
+        if let Some(state) = self.states.get_mut(msg_id) {
+            // Don't overwrite a real terminal state.
+            if !matches!(*state, OutboundState::Delivered) {
+                *state = OutboundState::Failed;
+                let _ = store.set_outbound_state(group_id, msg_id, OutboundState::Failed);
+            }
+        }
+    }
+
+    fn state_of(&self, msg_id: &str) -> OutboundState {
+        self.states
+            .get(msg_id)
+            .copied()
+            .unwrap_or(OutboundState::Sending)
+    }
+}
+
+/// Per protocol §6.4.2 (post-2026-05-06): the stream correlator lives in
+/// `body.stream_id` and is shared across every `text_delta` and `text_end`
+/// frame belonging to one logical streamed reply. Inner `id` is a fresh UUID
+/// per frame and is the dedup key (§6.6.9), not the stream correlator.
+///
+/// The transitional fallback (also called out in §6.4.2): if `body.stream_id`
+/// is absent, fall back to `inner.id`. This lets us render correctly against
+/// pre-2026-05-06 senders that still reuse `inner.id == stream_id`.
+fn stream_correlator(message: &chat4000_proto::InnerMessage) -> String {
+    message
+        .body
+        .get("stream_id")
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| message.id.to_string())
+}
+
+/// Render a snippet of arbitrary text for log lines: trims to N chars and
+/// replaces newlines/tabs with literal `\n`/`\t` so multi-line streams stay
+/// on one log line.
+fn truncate_for_log(text: &str, max_chars: usize) -> String {
+    let escaped: String = text
+        .chars()
+        .flat_map(|c| match c {
+            '\n' => vec!['\\', 'n'],
+            '\r' => vec!['\\', 'r'],
+            '\t' => vec!['\\', 't'],
+            c => vec![c],
+        })
+        .collect();
+    if escaped.chars().count() <= max_chars {
+        escaped
+    } else {
+        let mut out: String = escaped.chars().take(max_chars).collect();
+        out.push_str("…");
+        out
+    }
+}
+
+fn render_tick(state: OutboundState) -> &'static str {
+    match state {
+        OutboundState::Sending => "·",
+        OutboundState::Sent => "✓",
+        OutboundState::Delivered => "✓✓",
+        OutboundState::Failed => "✗",
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OutboundLine {
+    line_idx: usize,
+    body: String,
+}
+
+#[derive(Debug, Default)]
+struct OutboundLines {
+    by_msg_id: HashMap<String, OutboundLine>,
+}
+
+impl OutboundLines {
+    fn record(&mut self, msg_id: String, line_idx: usize, body: String) {
+        self.by_msg_id
+            .insert(msg_id, OutboundLine { line_idx, body });
+    }
+
+    /// Rewrites the recorded line in `transcript` to reflect `state`. Returns true if a
+    /// line was rewritten so the caller knows to re-render.
+    fn apply(&self, transcript: &mut [String], msg_id: &str, state: OutboundState) -> bool {
+        let Some(entry) = self.by_msg_id.get(msg_id) else {
+            return false;
+        };
+        let Some(slot) = transcript.get_mut(entry.line_idx) else {
+            return false;
+        };
+        let new_line = format!("{} {}", entry.body, render_tick(state));
+        if *slot == new_line {
+            return false;
+        }
+        *slot = new_line;
+        true
+    }
 }
 
 fn cmd_history(args: HistoryArgs, paths: &AppPaths) -> Result<()> {
@@ -1119,8 +1407,14 @@ ONE-SHOT MESSAGING (no streaming, prints the agent's full reply)
                                  `agent:` prefix. Pipe-friendly.
 
   Default output (both lines on stdout):
-    [HH:MM:SS.mmm] you: <message>
+    [HH:MM:SS.mmm] you: <message> <tick>
     [HH:MM:SS.mmm] agent: <reply>
+
+  Tick states (delivered = recipient acked at the application layer):
+    ·    sending     — created locally, no relay confirmation yet
+    ✓    sent        — relay accepted and queued the outbound message
+    ✓✓   delivered   — the plugin / paired client decrypted the message
+    ✗    failed      — local timeout or socket error
 
   With --raw: just <reply> on stdout.
 
@@ -1166,11 +1460,19 @@ INSIDE THE INTERACTIVE TUI
     PgUp / PgDn / mouse wheel      Scroll transcript
     Ctrl+C twice                   Exit
 
+DEBUG FLAGS
+  --debug-acks                   Print every recv_ack / relay_recv_ack /
+                                 inner ack frame to stderr. Combine with any
+                                 subcommand for verification.
+
 ENV VARS
   CHAT4000_TELEMETRY_DISABLED=1   Disable Sentry crash reports.
   CHAT4000_DEVICE_NAME=…          Override the auto-detected device name.
   CHAT4000_NO_QR=1                Suppress QR rendering during host pairing.
   CHAT4000_SENTRY_DSN=…           Build-time only; embedded into release builds.
+  CHAT4000_ALLOW_OUTDATED_PLUGIN=1
+                                  Bypass the hard block when the paired plugin
+                                  is below the relay's `min_version` policy.
 
 LOCAL FILES (macOS)
   ~/Library/Application Support/chat4000/group-config.json
@@ -1542,6 +1844,15 @@ async fn run_host_pairing_in_chat(
 }
 
 async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
+    use std::sync::Arc;
+
+    use chat4000_proto::{InnerMessageType, SenderRole};
+
+    use crate::transport::relay::TransportConfig;
+    use crate::transport::{
+        ConnectionState, MessageTransport, OutboundMessage, TransportEvent, TransportStatus,
+    };
+
     let group_id = config.group_id()?;
     let group_key = config.group_key()?;
     let device_identity = paths.load_or_create_device_identity()?;
@@ -1552,19 +1863,32 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
         "starting chat session"
     );
 
+    let store = Arc::new(paths.open_store().context("failed to open message store")?);
+
     println!("[connecting · group {}…]", &group_id[..8]);
-    let mut session = connect_with_retries(
-        DEFAULT_RELAY_URL,
-        &group_id,
-        &device_identity.sender.device_id,
-        group_key.clone(),
-        Some(device_identity.sender()),
-    )
-    .await?;
-    if let Some(blocking) = handle_version_policy_pre_chat(paths, session.version_policy()) {
+    let transport_config = TransportConfig {
+        relay_url: DEFAULT_RELAY_URL.to_string(),
+        group_id: group_id.clone(),
+        group_key: group_key.clone(),
+        device_id: device_identity.sender.device_id.clone(),
+        sender: device_identity.sender(),
+        app_id: Some(DEFAULT_APP_ID.to_string()),
+        app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        release_channel: Some(RELEASE_CHANNEL.to_string()),
+        allow_self_signed_tls: false,
+        debug_acks: debug_acks_enabled(),
+    };
+    let (transport, mut events) = start_transport_with_retries(&transport_config, &store).await?;
+    if let Some(blocking) =
+        handle_version_policy_pre_chat(paths, transport.version_policy().as_ref())
+    {
         eprintln!("{blocking}");
         return Ok(());
     }
+    let plugin_policy = transport.plugin_version_policy();
+    let mut outbound = OutboundTracker::default();
+    let mut outbound_lines = OutboundLines::default();
+    let mut plugin_seen = false;
 
     let _terminal_guard = TerminalGuard::enter()?;
     let mut ui = TerminalUi::new()?;
@@ -1583,13 +1907,12 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
 
     let mut render_state = ChatRenderState::default();
     let mut input_state = InputState::from_history(paths.read_input_history()?);
-    let mut reconnect_delay_secs = 2u64;
-    let mut render_tick = tokio::time::interval(Duration::from_millis(100));
+    let mut render_ticker = tokio::time::interval(Duration::from_millis(100));
     ui.render(&transcript, &render_state, &input_state)?;
 
     loop {
         tokio::select! {
-            _ = render_tick.tick() => {
+            _ = render_ticker.tick() => {
                 if render_state.tick() {
                     ui.render(&transcript, &render_state, &input_state)?;
                 }
@@ -1758,7 +2081,9 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
                                     continue;
                                 }
 
-                                session.send_text(&send)?;
+                                let outbound_id = transport.send(OutboundMessage::Text(send.clone()));
+                                outbound.track(outbound_id.clone());
+                                let _ = store.record_outbound(&group_id, &outbound_id, unix_ms());
                                 paths.append_history(&HistoryEntry {
                                     role: HistoryRole::User,
                                     text: display_line.clone(),
@@ -1766,7 +2091,17 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
                                 })?;
                                 paths.append_input_history(&display_line)?;
                                 render_state.set_busy_phase(BusyPhase::Thinking);
-                                push_transcript_line(&mut transcript, format!("> {display_line}"));
+                                let body = format!("> {display_line}");
+                                let line = format!(
+                                    "{body} {}",
+                                    render_tick(OutboundState::Sending)
+                                );
+                                push_transcript_line(&mut transcript, line);
+                                outbound_lines.record(
+                                    outbound_id,
+                                    transcript.len() - 1,
+                                    body,
+                                );
                                 ui.render(&transcript, &render_state, &input_state)?;
                             }
                         }
@@ -1789,49 +2124,124 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
                     }
                 }
             }
-            maybe_event = session.next_event() => {
+            maybe_event = events.recv() => {
                 let Some(event) = maybe_event else { break; };
                 match event {
-                    SessionEvent::Connected => {
-                        reconnect_delay_secs = 2;
-                        info!("relay session connected");
+                    TransportEvent::Connection(ConnectionState::Connected) => {
+                        info!(
+                            stream_count = render_state.stream_buffers.len(),
+                            busy = render_state.busy.is_some(),
+                            "transport connected"
+                        );
                         push_transcript_line(&mut transcript, "[connected]".to_string());
                         ui.render(&transcript, &render_state, &input_state)?;
                     }
-                    SessionEvent::Disconnected(reason) => {
-                        warn!(reason = %reason, "relay session disconnected");
-                        render_state = ChatRenderState::default();
-                        push_transcript_line(&mut transcript, format!("[disconnected: {reason}]"));
-                        push_transcript_line(
-                            &mut transcript,
-                            format!("[reconnecting in {reconnect_delay_secs}s…]"),
+                    TransportEvent::Connection(ConnectionState::Reconnecting) => {
+                        warn!(
+                            stream_count = render_state.stream_buffers.len(),
+                            busy = render_state.busy.is_some(),
+                            "transport reconnecting — clearing render state including any stuck streams"
                         );
-                        ui.render(&transcript, &render_state, &input_state)?;
-                        tokio::time::sleep(Duration::from_secs(reconnect_delay_secs)).await;
-                        reconnect_delay_secs = (reconnect_delay_secs * 2).min(60);
-                        session = connect_with_retries(
-                            DEFAULT_RELAY_URL,
-                            &group_id,
-                            &device_identity.sender.device_id,
-                            group_key.clone(),
-                            Some(device_identity.sender()),
-                        )
-                        .await?;
-                        if let Some(blocking) =
-                            handle_version_policy_pre_chat(paths, session.version_policy())
-                        {
-                            push_transcript_line(&mut transcript, blocking);
-                            ui.render(&transcript, &render_state, &input_state)?;
-                            break;
+                        render_state = ChatRenderState::default();
+                        let still_sending: Vec<String> = outbound
+                            .states
+                            .iter()
+                            .filter_map(|(id, state)| {
+                                (*state == OutboundState::Sending).then(|| id.clone())
+                            })
+                            .collect();
+                        for id in still_sending {
+                            outbound.mark_failed(&id, &group_id, store.as_ref());
+                            outbound_lines.apply(&mut transcript, &id, OutboundState::Failed);
                         }
+                        push_transcript_line(&mut transcript, "[reconnecting…]".to_string());
+                        plugin_seen = false;
                         ui.render(&transcript, &render_state, &input_state)?;
                     }
-                    SessionEvent::InnerMessage(message) => {
+                    TransportEvent::Connection(ConnectionState::Failed(reason)) => {
+                        push_transcript_line(
+                            &mut transcript,
+                            format!("[connection failed: {reason}]"),
+                        );
+                        ui.render(&transcript, &render_state, &input_state)?;
+                    }
+                    TransportEvent::Connection(_) => {}
+                    TransportEvent::Status(update) => {
+                        match update.status {
+                            TransportStatus::Sent => {
+                                outbound.mark_sent(&update.msg_id, &group_id, store.as_ref());
+                            }
+                            TransportStatus::Failed => {
+                                outbound.mark_failed(&update.msg_id, &group_id, store.as_ref());
+                            }
+                        }
+                        if outbound_lines.apply(
+                            &mut transcript,
+                            &update.msg_id,
+                            outbound.state_of(&update.msg_id),
+                        ) {
+                            ui.render(&transcript, &render_state, &input_state)?;
+                        }
+                    }
+                    TransportEvent::Receive(message) => {
                         debug!(message_type = ?message.t, message_id = %message.id, "received inner message");
+                        // Plugin version policy enforcement on first plugin message.
+                        if !plugin_seen
+                            && message.from.as_ref().map(|f| f.role) == Some(SenderRole::Plugin)
+                        {
+                            plugin_seen = true;
+                            if let Some(policy) = plugin_policy.as_ref() {
+                                let plugin_v =
+                                    message.from.as_ref().and_then(|f| f.app_version.as_deref());
+                                match evaluate_plugin_version_policy(plugin_v, policy) {
+                                    PluginPolicyVerdict::HardBlock => {
+                                        if !allow_outdated_plugin() {
+                                            push_transcript_line(
+                                                &mut transcript,
+                                                "[plugin update required — set CHAT4000_ALLOW_OUTDATED_PLUGIN=1 to bypass]".to_string(),
+                                            );
+                                        } else {
+                                            push_transcript_line(
+                                                &mut transcript,
+                                                "[plugin update required, bypassed]".to_string(),
+                                            );
+                                        }
+                                        ui.render(&transcript, &render_state, &input_state)?;
+                                    }
+                                    PluginPolicyVerdict::SoftNag => {
+                                        push_transcript_line(
+                                            &mut transcript,
+                                            "[plugin update available]".to_string(),
+                                        );
+                                        ui.render(&transcript, &render_state, &input_state)?;
+                                    }
+                                    PluginPolicyVerdict::Ok => {}
+                                }
+                            }
+                        }
+                        // Inner-ack Flow B inbound: drives delivered tick.
+                        if let Some(ack) = message.as_ack() {
+                            if ack.stage == "received" {
+                                outbound.mark_delivered(ack.refs, &group_id, store.as_ref());
+                                if debug_acks_enabled() {
+                                    eprintln!("[ack] inner ack received refs={}", ack.refs);
+                                }
+                                if outbound_lines.apply(
+                                    &mut transcript,
+                                    ack.refs,
+                                    outbound.state_of(ack.refs),
+                                ) {
+                                    ui.render(&transcript, &render_state, &input_state)?;
+                                }
+                            }
+                            continue;
+                        }
                         if device_identity.is_local_sender(message.from.as_ref()) {
                             debug!(message_id = %message.id, "ignoring same-device echo");
                             continue;
                         }
+                        // §6.6.5 v1: only the plugin emits inner ack frames.
+                        // The CLI is an app and stays silent on the ack channel.
                         maybe_push_plugin_update_warning(
                             &mut render_state,
                             &mut transcript,
@@ -1852,19 +2262,43 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
                                 }
                             }
                             chat4000_proto::InnerMessageType::TextDelta => {
-                                let id = message.id.to_string();
+                                let id = stream_correlator(&message);
                                 let delta = message.body.get("delta").and_then(|v| v.as_str()).unwrap_or_default();
-                                debug!(stream_id = %id, delta_len = delta.len(), "received text_delta");
+                                debug!(
+                                    stream_id = %id,
+                                    inner_id = %message.id,
+                                    delta_len = delta.len(),
+                                    delta_snippet = %truncate_for_log(delta, 80),
+                                    sender_role = ?message.from.as_ref().map(|f| f.role),
+                                    sender_device = ?message.from.as_ref().map(|f| &f.device_id),
+                                    "received text_delta"
+                                );
                                 render_state.update_stream_delta(id, message.from.clone(), delta);
                                 ui.render(&transcript, &render_state, &input_state)?;
                             }
                             chat4000_proto::InnerMessageType::TextEnd => {
-                                let id = message.id.to_string();
+                                let id = stream_correlator(&message);
                                 let text = message.body.get("text").and_then(|v| v.as_str()).unwrap_or_default();
                                 let reset = message.body.get("reset").and_then(|v| v.as_bool()).unwrap_or(false);
-                                debug!(stream_id = %id, final_text_len = text.len(), reset, "received text_end");
+                                debug!(
+                                    stream_id = %id,
+                                    inner_id = %message.id,
+                                    final_text_len = text.len(),
+                                    text_snippet = %truncate_for_log(text, 80),
+                                    reset,
+                                    sender_role = ?message.from.as_ref().map(|f| f.role),
+                                    sender_device = ?message.from.as_ref().map(|f| &f.device_id),
+                                    "received text_end"
+                                );
                                 let (sender, final_text, suppressed) =
                                     render_state.complete_stream(&id, message.from.clone(), text);
+                                debug!(
+                                    stream_id = %id,
+                                    suppressed,
+                                    streams_remaining = render_state.stream_buffers.len(),
+                                    busy_after = render_state.busy.is_some(),
+                                    "stream completed in run_chat_session"
+                                );
                                 if !reset && !suppressed && !final_text.is_empty() {
                                     let rendered = render_chat_line(sender.as_ref(), &final_text);
                                     push_transcript_line(&mut transcript, rendered.clone());
@@ -1904,6 +2338,7 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
                                 push_transcript_line(&mut transcript, "[received audio message]".to_string());
                                 ui.render(&transcript, &render_state, &input_state)?;
                             }
+                            chat4000_proto::InnerMessageType::Ack => {}
                         }
                     }
                 }
@@ -1911,46 +2346,83 @@ async fn run_chat_session(config: GroupConfig, paths: &AppPaths) -> Result<()> {
         }
     }
 
+    transport.disconnect();
     Ok(())
 }
 
-async fn connect_with_retries(
-    relay: &str,
-    group_id: &str,
-    device_id: &str,
-    group_key: Vec<u8>,
-    sender: Option<SenderInfo>,
-) -> Result<chat4000_relay::RelaySession> {
+async fn start_transport_with_retries(
+    config: &transport::relay::TransportConfig,
+    store: &std::sync::Arc<MessageStore>,
+) -> Result<(
+    transport::relay::RelayMessageTransport,
+    transport::TransportEvents,
+)> {
     let mut delay = 2u64;
     loop {
-        match connect_session(
-            relay,
-            group_id,
-            device_id,
-            group_key.clone(),
-            sender.clone(),
-            None,
-            Some(DEFAULT_APP_ID.to_string()),
-            Some(env!("CARGO_PKG_VERSION").to_string()),
-            false,
+        match transport::relay::RelayMessageTransport::start(
+            config.clone(),
+            std::sync::Arc::clone(store),
         )
         .await
         {
-            Ok(session) => return Ok(session),
+            Ok(pair) => return Ok(pair),
             Err(err) => {
-                error!(
-                    relay = %relay,
-                    group_id = %group_id,
-                    delay_secs = delay,
-                    error = ?err,
-                    "connection attempt failed"
-                );
-                record_exception("connect_retry_error", &format!("{err:?}"));
+                error!(error = ?err, delay_secs = delay, "transport start failed");
+                record_exception("transport_start_error", &format!("{err:?}"));
                 tokio::time::sleep(Duration::from_secs(delay)).await;
                 delay = (delay * 2).min(60);
             }
         }
     }
+}
+
+fn debug_acks_enabled() -> bool {
+    DEBUG_ACKS.get().copied().unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PluginPolicyVerdict {
+    Ok,
+    SoftNag,
+    HardBlock,
+}
+
+fn evaluate_plugin_version_policy(
+    plugin_version: Option<&str>,
+    policy: &VersionPolicy,
+) -> PluginPolicyVerdict {
+    let parsed = plugin_version.and_then(|v| semver::Version::parse(v).ok());
+    let Some(plugin_v) = parsed else {
+        // Missing or unparseable plugin version: behave like soft nag, never hard-block.
+        return if policy.recommended_version.is_some() {
+            PluginPolicyVerdict::SoftNag
+        } else {
+            PluginPolicyVerdict::Ok
+        };
+    };
+    if let Some(min) = policy
+        .min_version
+        .as_deref()
+        .and_then(|v| semver::Version::parse(v).ok())
+    {
+        if plugin_v < min {
+            return PluginPolicyVerdict::HardBlock;
+        }
+    }
+    if let Some(rec) = policy
+        .recommended_version
+        .as_deref()
+        .and_then(|v| semver::Version::parse(v).ok())
+    {
+        if plugin_v < rec {
+            return PluginPolicyVerdict::SoftNag;
+        }
+    }
+    PluginPolicyVerdict::Ok
+}
+
+fn allow_outdated_plugin() -> bool {
+    env_truthy(ALLOW_OUTDATED_PLUGIN_ENV)
 }
 
 #[derive(Debug, Clone)]
@@ -3243,6 +3715,13 @@ fn compose_status_lines(
     max_rows: usize,
 ) -> Vec<StatusRenderLine> {
     if let Some(stream) = state.latest_stream() {
+        debug!(
+            stream_count = state.stream_buffers.len(),
+            stream_text_len = stream.text.len(),
+            stream_text_snippet = %truncate_for_log(&stream.text, 80),
+            busy = state.busy.is_some(),
+            "compose_status_lines: rendering active stream"
+        );
         let prefix = if let Some(busy) = &state.busy {
             format_status_prefix(
                 SPINNER_FRAMES[busy.spinner_index % SPINNER_FRAMES.len()],
@@ -3251,6 +3730,15 @@ fn compose_status_lines(
                 busy.started_at.elapsed().as_secs(),
             )
         } else {
+            // No busy state but still rendering a stream — this is the fallback
+            // path. Log it because in practice it usually means a `Status: idle`
+            // arrived while a stream was still mid-flight, and `text_end` may
+            // never fire — leaving "Streaming" stuck on screen.
+            warn!(
+                stream_count = state.stream_buffers.len(),
+                stream_text_len = stream.text.len(),
+                "compose_status_lines: stream present without busy state — possible stuck render"
+            );
             "Streaming          ".to_string()
         };
         let mut rows = Vec::new();
@@ -3454,8 +3942,12 @@ fn handle_version_policy_pre_chat(
             let now_ms = unix_ms();
             if should_show_soft_nag(paths, recommended.as_deref(), now_ms) {
                 let line = match recommended.as_deref() {
-                    Some(version) => format!("Update available: chat4000 {version} is recommended."),
-                    None => "Update available: a newer chat4000 version is recommended.".to_string(),
+                    Some(version) => {
+                        format!("Update available: chat4000 {version} is recommended.")
+                    }
+                    None => {
+                        "Update available: a newer chat4000 version is recommended.".to_string()
+                    }
                 };
                 println!("{line}");
                 if let Err(err) = paths.write_update_nag(&UpdateNagRecord {
@@ -3556,6 +4048,7 @@ struct AppPaths {
     input_history_file: PathBuf,
     device_identity_file: PathBuf,
     update_nag_file: PathBuf,
+    store_file: PathBuf,
     log_dir: PathBuf,
 }
 
@@ -3580,8 +4073,13 @@ impl AppPaths {
             input_history_file: data_dir.join("input_history"),
             device_identity_file: data_dir.join("device-identity.json"),
             update_nag_file: config_dir.join("update-nag.json"),
+            store_file: data_dir.join("store.sqlite"),
             log_dir,
         })
+    }
+
+    fn open_store(&self) -> Result<MessageStore> {
+        MessageStore::open(&self.store_file)
     }
 
     fn read_update_nag(&self) -> Option<UpdateNagRecord> {
@@ -3741,6 +4239,7 @@ impl AppPaths {
             || self.input_history_file.exists()
             || self.device_identity_file.exists()
             || self.update_nag_file.exists()
+            || self.store_file.exists()
     }
 
     fn remove_local_state(&self) -> Result<()> {
@@ -3770,10 +4269,23 @@ impl AppPaths {
             );
         }
         if self.update_nag_file.exists() {
-            fs::remove_file(&self.update_nag_file).with_context(|| {
-                format!("failed removing {}", self.update_nag_file.display())
-            })?;
+            fs::remove_file(&self.update_nag_file)
+                .with_context(|| format!("failed removing {}", self.update_nag_file.display()))?;
             info!(path = %self.update_nag_file.display(), "removed update nag file");
+        }
+        for ext in ["", "-wal", "-shm"] {
+            let path = if ext.is_empty() {
+                self.store_file.clone()
+            } else {
+                let mut p = self.store_file.clone().into_os_string();
+                p.push(ext);
+                PathBuf::from(p)
+            };
+            if path.exists() {
+                fs::remove_file(&path)
+                    .with_context(|| format!("failed removing {}", path.display()))?;
+                info!(path = %path.display(), "removed store file");
+            }
         }
         Ok(())
     }
@@ -3870,6 +4382,270 @@ fn should_forward_key_event(key: &KeyEvent) -> bool {
 mod tests {
     use super::*;
 
+    /// §6.6.5 v1: only the plugin emits inner ack frames. The CLI is an app
+    /// and must stay silent on the ack channel — regardless of sender role.
+    #[test]
+    fn consumer_does_not_emit_inner_acks() {
+        use chat4000_proto::{InnerMessage, SenderInfo, SenderRole};
+
+        use crate::transport::mock::MockMessageTransport;
+
+        let (mock, _events) = MockMessageTransport::new();
+        let plugin_sender = SenderInfo {
+            role: SenderRole::Plugin,
+            device_id: "remote-plugin".into(),
+            device_name: "OpenClaw".into(),
+            app_version: Some("0.7.0".into()),
+            bundle_id: Some("@chat4000/openclaw-plugin".into()),
+        };
+        let other_app_sender = SenderInfo {
+            role: SenderRole::App,
+            device_id: "other-phone".into(),
+            device_name: "Phone".into(),
+            app_version: Some("1.0.1".into()),
+            bundle_id: Some("com.neonnode.chat4000app".into()),
+        };
+        let mut plugin_seen = false;
+        handle_received_for_consumer(
+            &InnerMessage::text_with_sender("hi from plugin", plugin_sender),
+            None,
+            &mut plugin_seen,
+        );
+        handle_received_for_consumer(
+            &InnerMessage::text_with_sender("hi from sibling app", other_app_sender),
+            None,
+            &mut plugin_seen,
+        );
+        assert!(
+            mock.sent().is_empty(),
+            "CLI must not emit inner acks in v1 per §6.6.5"
+        );
+    }
+
+    /// `OutboundTracker` consumes Sent + delivered (inner-ack) signals exactly
+    /// like the real transport feeds them — and gates further transitions
+    /// idempotently per §6.6.7 "at-most-one ack per (refs, stage)".
+    #[tokio::test]
+    async fn outbound_tracker_drives_sent_then_delivered_via_mock_events() {
+        use chat4000_proto::{InnerMessage, SenderInfo, SenderRole};
+
+        use crate::transport::TransportStatus;
+        use crate::transport::mock::MockMessageTransport;
+        use crate::transport::{MessageTransport, OutboundMessage, TransportEvent};
+
+        let tmp = std::env::temp_dir().join(format!("chat4000-mock-test-{}", uuid::Uuid::new_v4()));
+        let store = MessageStore::open(&tmp.join("store.sqlite")).unwrap();
+
+        let (mock, mut events) = MockMessageTransport::new();
+        let outbound_id = mock.send(OutboundMessage::Text("hi".into()));
+        let mut tracker = OutboundTracker::default();
+        tracker.track(outbound_id.clone());
+        store.record_outbound("g", &outbound_id, 100).unwrap();
+
+        // Pretend the relay confirmed the queue.
+        mock.emit_status(outbound_id.clone(), TransportStatus::Sent);
+        match events.recv().await.unwrap() {
+            TransportEvent::Status(update) => tracker.mark_sent(&update.msg_id, "g", &store),
+            other => panic!("expected Status, got {other:?}"),
+        }
+        assert_eq!(tracker.state_of(&outbound_id), OutboundState::Sent);
+
+        // Pretend the plugin sent a Flow B inner ack pointing at our outbound.
+        let plugin_sender = SenderInfo {
+            role: SenderRole::Plugin,
+            device_id: "remote-plugin".into(),
+            device_name: "OpenClaw".into(),
+            app_version: Some("0.7.0".into()),
+            bundle_id: None,
+        };
+        let ack_inner = InnerMessage::ack_received(&outbound_id, plugin_sender);
+        mock.deliver(ack_inner);
+        match events.recv().await.unwrap() {
+            TransportEvent::Receive(inner) => {
+                let ack = inner.as_ack().expect("ack body");
+                assert_eq!(ack.stage, "received");
+                tracker.mark_delivered(ack.refs, "g", &store);
+            }
+            other => panic!("expected Receive, got {other:?}"),
+        }
+        assert_eq!(tracker.state_of(&outbound_id), OutboundState::Delivered);
+
+        // Subsequent Sent updates must not regress an already-Delivered state.
+        mock.emit_status(outbound_id.clone(), TransportStatus::Sent);
+        match events.recv().await.unwrap() {
+            TransportEvent::Status(update) => tracker.mark_sent(&update.msg_id, "g", &store),
+            other => panic!("expected Status, got {other:?}"),
+        }
+        assert_eq!(tracker.state_of(&outbound_id), OutboundState::Delivered);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Redrive scenario: spec §6.6.9 says "a duplicate `msg_id` from any source
+    /// must be processed exactly once at the application layer". The
+    /// MockMessageTransport itself doesn't dedupe (real transports do), but we
+    /// can prove the consumer-side dedup story by feeding the same inner.id
+    /// twice via the store and asserting only the first is acted on.
+    #[test]
+    fn store_dedupes_replayed_inner_messages() {
+        let tmp =
+            std::env::temp_dir().join(format!("chat4000-redrive-test-{}", uuid::Uuid::new_v4()));
+        let store = MessageStore::open(&tmp.join("store.sqlite")).unwrap();
+        // First arrival is fresh.
+        assert!(
+            store
+                .try_persist_received("g", "inner-1", Some(101), 100, Some("plugin"))
+                .unwrap()
+        );
+        // Redrive after reconnect is a no-op (returns false), but the
+        // watermark-update path is still safe to call.
+        assert!(
+            !store
+                .try_persist_received("g", "inner-1", Some(101), 200, Some("plugin"))
+                .unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn plugin_policy_hard_block_below_min() {
+        let policy = VersionPolicy {
+            min_version: Some("0.5.0".into()),
+            recommended_version: Some("0.7.0".into()),
+            latest_version: None,
+        };
+        assert_eq!(
+            evaluate_plugin_version_policy(Some("0.1.0"), &policy),
+            PluginPolicyVerdict::HardBlock
+        );
+    }
+
+    #[test]
+    fn plugin_policy_soft_nag_below_recommended() {
+        let policy = VersionPolicy {
+            min_version: Some("0.5.0".into()),
+            recommended_version: Some("0.7.0".into()),
+            latest_version: None,
+        };
+        assert_eq!(
+            evaluate_plugin_version_policy(Some("0.5.5"), &policy),
+            PluginPolicyVerdict::SoftNag
+        );
+    }
+
+    #[test]
+    fn plugin_policy_missing_version_is_soft_nag_not_hard_block() {
+        let policy = VersionPolicy {
+            min_version: Some("0.5.0".into()),
+            recommended_version: Some("0.7.0".into()),
+            latest_version: None,
+        };
+        assert_eq!(
+            evaluate_plugin_version_policy(None, &policy),
+            PluginPolicyVerdict::SoftNag
+        );
+    }
+
+    #[test]
+    fn outbound_tracker_state_transitions_match_protocol_ticks() {
+        let tmp = tempdir_for_store();
+        let store = MessageStore::open(&tmp.path().join("test.sqlite")).unwrap();
+        let mut tracker = OutboundTracker::default();
+        tracker.track("m-1".to_string());
+        store.record_outbound("g", "m-1", 100).unwrap();
+
+        assert_eq!(tracker.state_of("m-1"), OutboundState::Sending);
+        tracker.mark_sent("m-1", "g", &store);
+        assert_eq!(tracker.state_of("m-1"), OutboundState::Sent);
+        tracker.mark_delivered("m-1", "g", &store);
+        assert_eq!(tracker.state_of("m-1"), OutboundState::Delivered);
+
+        // mark_failed must not regress a delivered message.
+        tracker.mark_failed("m-1", "g", &store);
+        assert_eq!(tracker.state_of("m-1"), OutboundState::Delivered);
+    }
+
+    #[test]
+    fn outbound_tracker_failed_is_terminal_for_in_flight_send() {
+        let tmp = tempdir_for_store();
+        let store = MessageStore::open(&tmp.path().join("test.sqlite")).unwrap();
+        let mut tracker = OutboundTracker::default();
+        tracker.track("m-1".to_string());
+        store.record_outbound("g", "m-1", 100).unwrap();
+        tracker.mark_failed("m-1", "g", &store);
+        assert_eq!(tracker.state_of("m-1"), OutboundState::Failed);
+    }
+
+    #[test]
+    fn outbound_lines_rewrites_tick_in_place() {
+        let mut lines = OutboundLines::default();
+        let mut transcript = vec!["[connected]".to_string(), "> hello world ·".to_string()];
+        lines.record("m-1".into(), 1, "> hello world".into());
+
+        assert!(lines.apply(&mut transcript, "m-1", OutboundState::Sent));
+        assert_eq!(transcript[1], "> hello world ✓");
+        assert!(lines.apply(&mut transcript, "m-1", OutboundState::Delivered));
+        assert_eq!(transcript[1], "> hello world ✓✓");
+        // Idempotent: applying the same state again returns false (no re-render needed).
+        assert!(!lines.apply(&mut transcript, "m-1", OutboundState::Delivered));
+    }
+
+    #[test]
+    fn inner_ack_round_trip_drives_delivered() {
+        let sender = SenderInfo {
+            role: SenderRole::Plugin,
+            device_id: "plug-1".into(),
+            device_name: "OpenClaw".into(),
+            app_version: Some("0.7.0".into()),
+            bundle_id: Some("@chat4000/openclaw-plugin".into()),
+        };
+        let inner = chat4000_proto::InnerMessage::ack_received("outbound-msg-id-1", sender);
+        let raw = serde_json::to_string(&inner).unwrap();
+        let parsed: chat4000_proto::InnerMessage = serde_json::from_str(&raw).unwrap();
+        let ack = parsed.as_ack().expect("ack body should parse");
+        assert_eq!(ack.refs, "outbound-msg-id-1");
+        assert_eq!(ack.stage, "received");
+    }
+
+    fn tempdir_for_store() -> TempDir {
+        TempDir::new().expect("tempdir")
+    }
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new() -> Result<Self> {
+            let path = std::env::temp_dir().join(format!("chat4000-test-{}", Uuid::new_v4()));
+            fs::create_dir_all(&path)?;
+            Ok(Self { path })
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn plugin_policy_at_or_above_recommended_is_ok() {
+        let policy = VersionPolicy {
+            min_version: Some("0.5.0".into()),
+            recommended_version: Some("0.7.0".into()),
+            latest_version: None,
+        };
+        assert_eq!(
+            evaluate_plugin_version_policy(Some("0.7.0"), &policy),
+            PluginPolicyVerdict::Ok
+        );
+    }
+
     fn test_paths(temp_root: &Path) -> AppPaths {
         AppPaths {
             config_file: temp_root.join("group-config.json"),
@@ -3877,6 +4653,7 @@ mod tests {
             input_history_file: temp_root.join("input_history"),
             device_identity_file: temp_root.join("device-identity.json"),
             update_nag_file: temp_root.join("update-nag.json"),
+            store_file: temp_root.join("store.sqlite"),
             log_dir: temp_root.join("logs"),
         }
     }
@@ -3932,6 +4709,107 @@ mod tests {
 
         let stream = state.stream_buffers.get("stream-b").unwrap();
         assert_eq!(stream.text, "Actually: Hello again");
+    }
+
+    /// Regression for the "Streaming  🌿" stuck-render bug. Per protocol
+    /// §6.4.2 (post-2026-05-06), the stream correlator lives in
+    /// `body.stream_id`, not in `inner.id`. The plugin emits a fresh inner.id
+    /// per frame (correct, dedup-able per §6.6.9) but reuses one stream_id
+    /// across all frames in a logical reply. Verify that `stream_correlator`
+    /// pulls the body.stream_id field, so concatenation and finalize all
+    /// land on the same buffer key.
+    #[test]
+    fn stream_correlator_reads_body_stream_id() {
+        use chat4000_proto::{InnerMessage, InnerMessageType};
+        use uuid::Uuid;
+
+        let make_frame = |t: InnerMessageType, stream_id: &str, content: serde_json::Value| {
+            let mut body = content;
+            body["stream_id"] = serde_json::Value::String(stream_id.to_string());
+            InnerMessage {
+                t,
+                id: Uuid::new_v4(),
+                from: None,
+                body,
+                ts: 0,
+            }
+        };
+
+        let stream_id = "shared-stream-id-x";
+        let f1 = make_frame(
+            InnerMessageType::TextDelta,
+            stream_id,
+            serde_json::json!({ "delta": "Hey" }),
+        );
+        let f2 = make_frame(
+            InnerMessageType::TextDelta,
+            stream_id,
+            serde_json::json!({ "delta": "o" }),
+        );
+        let f3 = make_frame(
+            InnerMessageType::TextEnd,
+            stream_id,
+            serde_json::json!({ "text": "Heyo" }),
+        );
+
+        // All three frames have different inner.id but the same body.stream_id.
+        assert_ne!(f1.id, f2.id);
+        assert_ne!(f2.id, f3.id);
+        assert_eq!(stream_correlator(&f1), stream_id);
+        assert_eq!(stream_correlator(&f2), stream_id);
+        assert_eq!(stream_correlator(&f3), stream_id);
+    }
+
+    /// Pre-2026-05-06 fallback: a frame with no `body.stream_id` should
+    /// correlate by `inner.id` so legacy senders still render correctly.
+    #[test]
+    fn stream_correlator_falls_back_to_inner_id_for_legacy_senders() {
+        use chat4000_proto::{InnerMessage, InnerMessageType};
+        use uuid::Uuid;
+
+        let id = Uuid::new_v4();
+        let frame = InnerMessage {
+            t: InnerMessageType::TextDelta,
+            id,
+            from: None,
+            body: serde_json::json!({ "delta": "hi" }),
+            ts: 0,
+        };
+        assert_eq!(stream_correlator(&frame), id.to_string());
+    }
+
+    /// End-to-end render: feed in three deltas + one text_end all sharing one
+    /// body.stream_id but each carrying its own fresh inner.id, and verify the
+    /// active-stream buffer concatenates correctly and clears on text_end.
+    #[test]
+    fn streaming_concatenates_by_body_stream_id_across_frames() {
+        use chat4000_proto::SenderRole;
+
+        let mut state = ChatRenderState::default();
+        let plugin_sender = SenderInfo {
+            role: SenderRole::Plugin,
+            device_id: "plugin-1".into(),
+            device_name: "OpenClaw".into(),
+            app_version: Some("0.7.0".into()),
+            bundle_id: None,
+        };
+        let stream_id = "stream-shared".to_string();
+
+        state.update_stream_delta(stream_id.clone(), Some(plugin_sender.clone()), "Hey");
+        state.update_stream_delta(stream_id.clone(), Some(plugin_sender.clone()), "o");
+        state.update_stream_delta(stream_id.clone(), Some(plugin_sender.clone()), " 🌿");
+        assert_eq!(
+            state.stream_buffers.get(&stream_id).unwrap().text,
+            "Heyo 🌿"
+        );
+
+        let (_sender, text, suppressed) =
+            state.complete_stream(&stream_id, Some(plugin_sender), "Heyo 🌿");
+        assert!(!suppressed);
+        assert_eq!(text, "Heyo 🌿");
+        assert!(state.stream_buffers.is_empty());
+        assert!(state.busy.is_none());
+        assert!(state.latest_stream().is_none());
     }
 
     #[test]

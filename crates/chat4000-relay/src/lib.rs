@@ -3,7 +3,10 @@
 // Licensed under GPL-3.0. See LICENSE file for details.
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -15,9 +18,9 @@ use chat4000_crypto::{
     generate_pairing_code, unwrap_group_key, wrap_group_key,
 };
 use chat4000_proto::{
-    ClientRole, DEFAULT_RELAY_URL, HEARTBEAT_INTERVAL_SECS, HelloPayload, IncomingMessage,
-    InnerMessage, MessageType, MsgPayload, PairDataMessage, PairingRole, RelayOutgoing, SenderInfo,
-    VersionPolicy, WrappedGroupKey,
+    ClientRole, DEFAULT_RELAY_URL, HEARTBEAT_DEAD_AFTER_SECS, HEARTBEAT_INTERVAL_SECS,
+    HelloPayload, IncomingMessage, InnerMessage, MessageType, PairDataMessage, PairingRole,
+    RelayOutgoing, SenderInfo, VersionPolicy, WrappedGroupKey,
 };
 use futures_util::{SinkExt, StreamExt, stream::SplitSink, stream::SplitStream};
 use tokio::{net::TcpStream, sync::mpsc, task::JoinHandle};
@@ -91,7 +94,14 @@ pub enum PairHostStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEvent {
     Connected,
-    InnerMessage(InnerMessage),
+    InnerMessage {
+        inner: InnerMessage,
+        seq: Option<u64>,
+    },
+    RelayRecvAck {
+        msg_id: String,
+        queued_for: Vec<String>,
+    },
     Disconnected(String),
 }
 
@@ -99,6 +109,8 @@ pub struct RelaySession {
     group_key: Vec<u8>,
     sender: Option<SenderInfo>,
     version_policy: Option<VersionPolicy>,
+    plugin_version_policy: Option<VersionPolicy>,
+    ack_aware: Arc<AtomicBool>,
     send_tx: mpsc::UnboundedSender<String>,
     event_rx: mpsc::UnboundedReceiver<SessionEvent>,
     last_pong: Arc<Mutex<Instant>>,
@@ -281,45 +293,56 @@ where
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ConnectOptions {
+    pub device_token: Option<String>,
+    pub app_id: Option<String>,
+    pub app_version: Option<String>,
+    pub release_channel: Option<String>,
+    pub last_acked_seq: Option<u64>,
+    pub allow_self_signed_tls: bool,
+}
+
 pub async fn connect_session(
     relay_url: &str,
     group_id: &str,
     device_id: &str,
     group_key: Vec<u8>,
     sender: Option<SenderInfo>,
-    device_token: Option<String>,
-    app_id: Option<String>,
-    app_version: Option<String>,
-    allow_self_signed_tls: bool,
+    options: ConnectOptions,
 ) -> Result<RelaySession> {
     info!(
         relay_url = %relay_url,
         group_id = %group_id,
         device_id = %device_id,
-        allow_self_signed_tls,
+        allow_self_signed_tls = options.allow_self_signed_tls,
+        last_acked_seq = ?options.last_acked_seq,
         "connecting relay session"
     );
-    let mut socket = connect(relay_url, allow_self_signed_tls).await?;
+    let mut socket = connect(relay_url, options.allow_self_signed_tls).await?;
     let hello = serde_json::to_string(&chat4000_proto::Envelope::new(
         MessageType::Hello,
         HelloPayload {
             role: ClientRole::App,
             group_id: group_id.to_string(),
             device_id: device_id.to_string(),
-            device_token,
-            app_id,
-            app_version,
+            device_token: options.device_token,
+            app_id: options.app_id,
+            app_version: options.app_version,
+            release_channel: options.release_channel,
+            last_acked_seq: options.last_acked_seq,
         },
     ))?;
     send_json(&mut socket, hello).await?;
 
-    let version_policy = match read_incoming(&mut socket).await? {
+    let (version_policy, plugin_version_policy) = match read_incoming(&mut socket).await? {
         IncomingMessage::HelloOk(payload) => {
             debug!(
                 has_version_policy = payload.version_policy.is_some(),
+                has_plugin_version_policy = payload.plugin_version_policy.is_some(),
                 "received hello_ok"
             );
-            payload.version_policy
+            (payload.version_policy, payload.plugin_version_policy)
         }
         IncomingMessage::HelloError(payload) => {
             error!(code = %payload.code, message = %payload.message, "relay rejected hello");
@@ -336,12 +359,14 @@ pub async fn connect_session(
     let (send_tx, send_rx) = mpsc::unbounded_channel::<String>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let last_pong = Arc::new(Mutex::new(Instant::now()));
+    let ack_aware = Arc::new(AtomicBool::new(false));
 
     let writer = spawn_writer(write_half, send_rx);
     let reader = spawn_reader(
         read_half,
         group_key.clone(),
         Arc::clone(&last_pong),
+        Arc::clone(&ack_aware),
         event_tx,
     );
     let heartbeat = spawn_heartbeat(send_tx.clone(), Arc::clone(&last_pong));
@@ -351,6 +376,8 @@ pub async fn connect_session(
         group_key,
         sender,
         version_policy,
+        plugin_version_policy,
+        ack_aware,
         send_tx,
         event_rx,
         last_pong,
@@ -369,26 +396,79 @@ impl RelaySession {
         self.version_policy.as_ref()
     }
 
-    pub fn send_text(&self, text: &str) -> Result<()> {
+    pub fn plugin_version_policy(&self) -> Option<&VersionPolicy> {
+        self.plugin_version_policy.as_ref()
+    }
+
+    pub fn sender(&self) -> Option<&SenderInfo> {
+        self.sender.as_ref()
+    }
+
+    /// Returns the inner `msg_id` so the caller can correlate `relay_recv_ack` and
+    /// inner-`ack` frames back to this outbound message.
+    pub fn send_text(&self, text: &str) -> Result<String> {
+        self.send_text_with_options(text, true)
+    }
+
+    pub fn send_text_with_options(&self, text: &str, notify_if_offline: bool) -> Result<String> {
         let inner = match &self.sender {
             Some(sender) => InnerMessage::text_with_sender(text, sender.clone()),
             None => InnerMessage::text(text),
         };
+        self.send_inner(inner, Some(notify_if_offline))
+    }
+
+    pub fn send_inner_ack(&self, refs: &str) -> Result<String> {
+        let sender = self
+            .sender
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("session has no sender identity for inner ack"))?;
+        let inner = InnerMessage::ack_received(refs, sender);
+        // Ack frames must not request offline push (§6.3); ride through normal envelope path.
+        self.send_inner(inner, Some(false))
+    }
+
+    fn send_inner(&self, inner: InnerMessage, notify_if_offline: Option<bool>) -> Result<String> {
         let plaintext = serde_json::to_vec(&inner)?;
         let encrypted = encrypt(&plaintext, &self.group_key)?;
+        let msg_id = inner.id.to_string();
         self.send_tx
             .send(RelayOutgoing::msg(
                 encrypted.nonce,
                 encrypted.ciphertext,
-                inner.id.to_string(),
+                msg_id.clone(),
+                notify_if_offline,
             )?)
-            .context("failed queueing outbound text")
+            .context("failed queueing outbound inner message")?;
+        Ok(msg_id)
+    }
+
+    pub fn send_recv_ack(&self, up_to_seq: u64, ranges: Vec<[u64; 2]>) -> Result<()> {
+        self.send_tx
+            .send(RelayOutgoing::recv_ack(up_to_seq, ranges)?)
+            .context("failed queueing recv_ack")
+    }
+
+    /// Pushes a fully-formed JSON envelope onto the writer channel. Used by the
+    /// `MessageTransport` facade so it can own encryption + outer-envelope
+    /// construction itself (and therefore generate its own `msg_id` before the
+    /// frame is actually written to the socket).
+    pub fn send_envelope(&self, json: String) -> Result<()> {
+        self.send_tx
+            .send(json)
+            .context("failed queueing raw envelope")
+    }
+
+    /// True once an inbound `msg` has been observed carrying a `seq` field. Until that
+    /// happens the client should assume a pre-ack relay and skip emitting `recv_ack`.
+    pub fn ack_aware(&self) -> bool {
+        self.ack_aware.load(Ordering::Relaxed)
     }
 
     pub fn latency_ok(&self) -> bool {
         self.last_pong
             .lock()
-            .map(|last| last.elapsed() <= Duration::from_secs(HEARTBEAT_INTERVAL_SECS * 2))
+            .map(|last| last.elapsed() <= Duration::from_secs(HEARTBEAT_DEAD_AFTER_SECS))
             .unwrap_or(false)
     }
 }
@@ -495,6 +575,7 @@ fn spawn_reader(
     mut read_half: SplitStream<RelaySocket>,
     group_key: Vec<u8>,
     last_pong: Arc<Mutex<Instant>>,
+    ack_aware: Arc<AtomicBool>,
     event_tx: mpsc::UnboundedSender<SessionEvent>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -503,7 +584,9 @@ fn spawn_reader(
             match frame {
                 Ok(Message::Text(text)) => {
                     debug!(payload = %text, "reader received text frame");
-                    if let Err(err) = handle_text_frame(&text, &group_key, &last_pong, &event_tx) {
+                    if let Err(err) =
+                        handle_text_frame(&text, &group_key, &last_pong, &ack_aware, &event_tx)
+                    {
                         error!(error = %err, "failed to handle text frame");
                         let _ = event_tx.send(SessionEvent::Disconnected(err.to_string()));
                         break;
@@ -513,7 +596,7 @@ fn spawn_reader(
                     if let Ok(text) = String::from_utf8(bytes.to_vec()) {
                         debug!(payload = %text, "reader received binary frame");
                         if let Err(err) =
-                            handle_text_frame(&text, &group_key, &last_pong, &event_tx)
+                            handle_text_frame(&text, &group_key, &last_pong, &ack_aware, &event_tx)
                         {
                             error!(error = %err, "failed to handle binary frame");
                             let _ = event_tx.send(SessionEvent::Disconnected(err.to_string()));
@@ -559,10 +642,13 @@ fn spawn_heartbeat(
             ticker.tick().await;
             let timed_out = last_pong
                 .lock()
-                .map(|last| last.elapsed() > Duration::from_secs(HEARTBEAT_INTERVAL_SECS * 2))
+                .map(|last| last.elapsed() > Duration::from_secs(HEARTBEAT_DEAD_AFTER_SECS))
                 .unwrap_or(false);
             if timed_out {
-                warn!("heartbeat timed out");
+                warn!(
+                    threshold_secs = HEARTBEAT_DEAD_AFTER_SECS,
+                    "application-layer heartbeat timed out, closing socket"
+                );
                 let _ = send_tx.send(String::new());
                 break;
             }
@@ -586,16 +672,28 @@ fn handle_text_frame(
     text: &str,
     group_key: &[u8],
     last_pong: &Arc<Mutex<Instant>>,
+    ack_aware: &Arc<AtomicBool>,
     event_tx: &mpsc::UnboundedSender<SessionEvent>,
 ) -> Result<()> {
     match IncomingMessage::parse(text)? {
-        IncomingMessage::Msg(MsgPayload {
-            nonce, ciphertext, ..
-        }) => {
-            debug!("handling encrypted relay message");
-            let plaintext = decrypt(&nonce, &ciphertext, group_key)?;
+        IncomingMessage::Msg(payload) => {
+            debug!(seq = ?payload.seq, "handling encrypted relay message");
+            if payload.seq.is_some() {
+                ack_aware.store(true, Ordering::Relaxed);
+            }
+            let plaintext = decrypt(&payload.nonce, &payload.ciphertext, group_key)?;
             let inner: InnerMessage = serde_json::from_slice(&plaintext)?;
-            let _ = event_tx.send(SessionEvent::InnerMessage(inner));
+            let _ = event_tx.send(SessionEvent::InnerMessage {
+                inner,
+                seq: payload.seq,
+            });
+        }
+        IncomingMessage::RelayRecvAck(payload) => {
+            debug!(msg_id = %payload.msg_id, "received relay_recv_ack");
+            let _ = event_tx.send(SessionEvent::RelayRecvAck {
+                msg_id: payload.msg_id,
+                queued_for: payload.queued_for,
+            });
         }
         IncomingMessage::Pong => {
             debug!("handling relay pong");

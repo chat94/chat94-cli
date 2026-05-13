@@ -16,6 +16,7 @@ dirs.workspace = true
 hex.workspace = true
 qrcode.workspace = true
 reedline.workspace = true
+rusqlite.workspace = true
 regex.workspace = true
 rustls.workspace = true
 semver.workspace = true
